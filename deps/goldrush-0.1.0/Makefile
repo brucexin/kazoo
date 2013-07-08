@@ -1,7 +1,7 @@
 # See LICENSE for licensing information.
 
 DIALYZER = dialyzer
-REBAR = rebar
+REBAR = ../../util/rebar/rebar
 APPNAME = goldrush
 
 all: app

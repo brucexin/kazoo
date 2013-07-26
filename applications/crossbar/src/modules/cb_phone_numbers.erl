@@ -33,6 +33,7 @@
 -define(ACTIVATE, <<"activate">>).
 -define(RESERVE, <<"reserve">>).
 -define(CLASSIFIERS, <<"classifiers">>).
+-define(IDENTIFY, <<"identify">>).
 
 -define(FIND_NUMBER_SCHEMA, "{\"$schema\": \"http://json-schema.org/draft-03/schema#\", \"id\": \"http://json-schema.org/draft-03/schema#\", \"properties\": {\"prefix\": {\"required\": \"true\", \"type\": \"string\", \"minLength\": 3, \"maxLength\": 8}, \"quantity\": {\"default\": 1, \"type\": \"integer\", \"minimum\": 1}}}").
 
@@ -112,6 +113,8 @@ allowed_methods(_, ?PORT) ->
     [?HTTP_PUT];
 allowed_methods(_, ?PORT_DOCS) ->
     [?HTTP_GET];
+allowed_methods(_, ?IDENTIFY) ->
+    [?HTTP_GET];
 allowed_methods(<<"collection">>, ?ACTIVATE) ->
     [?HTTP_PUT].
 
@@ -139,6 +142,7 @@ resource_exists(_, ?ACTIVATE) -> true;
 resource_exists(_, ?RESERVE) -> true;
 resource_exists(_, ?PORT) -> true;
 resource_exists(_, ?PORT_DOCS) -> true;
+resource_exists(_, ?IDENTIFY) -> true;
 resource_exists(_, _) -> false.
 
 resource_exists(_, ?PORT_DOCS, _) -> true;
@@ -223,7 +227,9 @@ validate(#cb_context{req_verb = ?HTTP_PUT}=Context, _Number, ?RESERVE) ->
 validate(#cb_context{req_verb = ?HTTP_PUT}=Context, _Number, ?PORT) ->
     validate_request(Context);
 validate(#cb_context{req_verb = ?HTTP_GET}=Context, Number, ?PORT_DOCS) ->
-    list_attachments(Number, Context).
+    list_attachments(Number, Context);
+validate(#cb_context{req_verb = ?HTTP_GET}=Context, Number, ?IDENTIFY) ->
+    identify(Context, Number).
 
 validate(#cb_context{req_verb = ?HTTP_DELETE}=Context, Number, ?PORT_DOCS, _) ->
     read(Number, Context);
@@ -330,7 +336,46 @@ summary(Context) ->
     case crossbar_doc:load(?WNM_PHONE_NUMBER_DOC, Context) of
         #cb_context{resp_error_code=404}=C ->
             crossbar_util:response(wh_json:new(), C);
-        Else -> Else
+        Else ->
+            Else#cb_context{resp_data=clean_summary(Else)}
+    end.
+
+-spec clean_summary(cb_context:context()) -> wh_json:json().
+clean_summary(#cb_context{resp_data=JObj, account_id=AccountId}) ->
+    Routines = [fun(J) ->
+                    wh_json:delete_key(<<"id">>, J)
+                end
+                ,fun(J) ->
+                    wh_json:set_value(<<"numbers">>, J, wh_json:new())
+                end
+                ,fun(J) ->
+                    Service =  wh_services:fetch(AccountId),
+                    Quantity = wh_services:cascade_category_quantity(<<"phone_numbers">>, [], Service),
+                    wh_json:set_value(<<"casquade_quantity">>, Quantity, J)
+                end
+                ],
+    lists:foldl(fun(F, J) -> F(J) end, JObj, Routines).
+
+
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% Attempt to load a summarized listing of all instances of this
+%% resource.
+%% @end
+%%--------------------------------------------------------------------
+-spec identify(cb_context:context(), ne_binary()) -> cb_context:context().
+identify(Context, Number) ->
+    case wh_number_manager:lookup_account_by_number(Number) of
+        {'error', 'not_reconcilable'} ->
+            cb_context:add_system_error('bad_identifier', [{'details', Number}], Context);
+        {'error', E} ->
+            set_response({wh_util:to_binary(E), <<>>}, Number, Context);
+        {'ok', AccountId, Options} ->
+            JObj = wh_json:set_values([{<<"account_id">>, AccountId}
+                                        ,{<<"number">>, proplists:get_value(number, Options)}]
+                                    ,wh_json:new()),
+            set_response({'ok', JObj}, Number, Context)
     end.
 
 %%--------------------------------------------------------------------

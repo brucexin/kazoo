@@ -20,10 +20,11 @@
          ,monitor_call/4
          ,channel_hungup/2
          ,originate_execute/2
+         ,originate_uuid/3
          ,outbound_call/2
          ,send_sync_req/1
          ,send_sync_resp/3, send_sync_resp/4
-         ,config/1
+         ,config/1, refresh_config/2
          ,send_status_resume/1
          ,add_acdc_queue/2
          ,rm_acdc_queue/2
@@ -74,8 +75,7 @@
          ,recording_url :: api_binary() %% where to send recordings after the call
          ,is_thief = 'false' :: boolean()
          ,agent :: agent()
-         ,agent_call_ids = [] :: api_binaries()
-         ,agent_call_queue :: api_binary()
+         ,agent_call_ids = [] :: api_binaries() | wh_proplist()
          ,cdr_urls = dict:new() :: dict() %% {CallId, Url}
          ,agent_presence_id :: api_binary()
          }).
@@ -109,6 +109,10 @@
                                                      ,{'agent_id', AgentId}
                                                      ,{'restrict_to', ['sync', 'stats_req']}
                                                     ]}
+                                    ,{'conf', [{'action', <<"*">>}
+                                               ,{'db', wh_util:format_account_id(AcctId, 'encoded')}
+                                               ,{'id', AgentId}
+                                              ]}
                                    ]).
 
 -define(RESPONDERS, [{{'acdc_agent_handler', 'handle_sync_req'}
@@ -140,6 +144,9 @@
                       }
                      ,{{'acdc_agent_handler', 'handle_destroy'}
                        ,[{<<"channel">>, <<"destroy">>}]
+                      }
+                     ,{{'acdc_agent_handler', 'handle_config_change'}
+                       ,[{<<"configuration">>, <<"*">>}]
                       }
                     ]).
 
@@ -228,6 +235,9 @@ channel_hungup(Srv, CallId) ->
 originate_execute(Srv, JObj) ->
     gen_listener:cast(Srv, {'originate_execute', JObj}).
 
+originate_uuid(Srv, UUID, CtlQ) ->
+    gen_listener:cast(Srv, {'originate_uuid', UUID, CtlQ}).
+
 outbound_call(Srv, CallId) ->
     gen_listener:cast(Srv, {'outbound_call', CallId}).
 
@@ -239,6 +249,9 @@ send_sync_resp(Srv, Status, ReqJObj, Options) ->
 
 -spec config(pid()) -> {ne_binary(), ne_binary(), ne_binary()}.
 config(Srv) -> gen_listener:call(Srv, 'config').
+
+refresh_config(_, 'undefined') -> 'ok';
+refresh_config(Srv, Qs) -> gen_listener:cast(Srv, {'refresh_config', Qs}).
 
 -spec agent_info(pid(), wh_json:key()) -> wh_json:json_term() | 'undefined'.
 agent_info(Srv, Field) -> gen_listener:call(Srv, {'agent_info', Field}).
@@ -285,6 +298,7 @@ maybe_update_presence_state(_Srv, 'undefined') -> 'ok';
 maybe_update_presence_state(Srv, State) ->
     presence_update(Srv, State).
 
+presence_update(_, 'undefined') -> 'ok';
 presence_update(Srv, PresenceState) ->
     gen_listener:cast(Srv, {'presence_update', PresenceState}).
 
@@ -359,6 +373,14 @@ handle_call(_Request, _From, #state{}=State) ->
 %%                                  {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+handle_cast({'refresh_config', Qs}, #state{agent_queues=Queues}=State) ->
+    {Add, Rm} = acdc_agent_util:changed(Queues, Qs),
+
+    Self = self(),
+    [gen_listener:cast(Self, {'queue_login', A}) || A <- Add],
+    [gen_listener:cast(Self, {'queue_logout', R}) || R <- Rm],
+
+    {'noreply', State};
 handle_cast({'stop_agent', Req}, #state{supervisor=Supervisor}=State) ->
     lager:debug("stop agent requested by ~p", [Req]),
     _ = spawn('acdc_agent_sup', 'stop', [Supervisor]),
@@ -426,22 +448,15 @@ handle_cast({'channel_hungup', CallId}, #state{call=Call
                                                ,recording_url=RecordingUrl
                                                ,is_thief=IsThief
                                                ,agent_call_ids=ACallIds
-                                               ,agent_call_queue=ACtrlQ
                                                ,agent_id=AgentId
-                                               ,my_q=MyQ
                                               }=State) ->
     CCallId = call_id(Call),
     case CallId of
         CCallId ->
             lager:debug("member channel hungup, done with this call"),
             acdc_util:unbind_from_call_events(Call),
-            [begin
-                 lager:debug("unbinding from agent call id ~s", [ACallId]),
-                 acdc_util:unbind_from_call_events(ACallId),
-                 stop_agent_leg(MyQ, ACallId, ACtrlQ)
-             end
-             || ACallId <- ACallIds
-            ],
+
+            _ = filter_agent_calls(ACallIds, CallId),
 
             maybe_stop_recording(Call, ShouldRecord, RecordingUrl),
 
@@ -452,7 +467,6 @@ handle_cast({'channel_hungup', CallId}, #state{call=Call
                                             ,msg_queue_id='undefined'
                                             ,acdc_queue_id='undefined'
                                             ,agent_call_ids=[]
-                                            ,agent_call_queue='undefined'
                                             ,recording_url='undefined'
                                            }
                      ,'hibernate'};
@@ -462,13 +476,17 @@ handle_cast({'channel_hungup', CallId}, #state{call=Call
                     {'noreply', State}
             end;
         _ ->
-            case lists:member(CallId, ACallIds) of
+            case props:get_value(CallId, ACallIds) of
                 'true' ->
                     lager:debug("agent channel ~s hungup/needs hanging up", [CallId]),
                     acdc_util:unbind_from_call_events(CallId),
-                    stop_agent_leg(MyQ, CallId, ACtrlQ),
                     {'noreply', State#state{agent_call_ids=lists:delete(CallId, ACallIds)}, 'hibernate'};
-                'false' ->
+                {ACallId, ACtrlQ} ->
+                    lager:debug("agent channel ~s hungup, stop call on ctlq ~s", [ACallId, ACtrlQ]),
+                    acdc_util:unbind_from_call_events(ACallId),
+                    stop_agent_leg(ACallId, ACtrlQ),
+                    {'noreply', State#state{agent_call_ids=props:delete(ACallId, ACallIds)}};
+                'undefined' ->
                     lager:debug("unknown call id ~s for channel_hungup, ignoring", [CallId]),
                     lager:debug("listening for call id(~s) and agents (~p)", [CCallId, ACallIds]),
                     {'noreply', State}
@@ -477,17 +495,10 @@ handle_cast({'channel_hungup', CallId}, #state{call=Call
 
 handle_cast('agent_timeout', #state{agent_call_ids=ACallIds
                                     ,agent_id=AgentId
-                                    ,agent_call_queue=ACtrlQ
-                                    ,my_q=MyQ
                                    }=State) ->
     lager:debug("agent timeout recv, stopping agent call"),
-    [begin
-         lager:debug("unbinding and stopping ~s", [ACallId]),
-         acdc_util:unbind_from_call_events(ACallId),
-         stop_agent_leg(MyQ, ACallId, ACtrlQ)
-     end
-     || ACallId <- ACallIds
-    ],
+
+    _ = filter_agent_calls(ACallIds, AgentId),
 
     put('callid', AgentId),
     {'noreply', State#state{msg_queue_id='undefined'
@@ -611,24 +622,19 @@ handle_cast({'member_connect_accepted', ACallId}, #state{msg_queue_id=AmqpQueue
                                                          ,acct_id=AcctId
                                                          ,agent_id=AgentId
                                                          ,my_id=MyId
-                                                         ,my_q=MyQ
                                                          ,record_calls=ShouldRecord
                                                          ,recording_url=RecordingUrl
                                                          ,agent_call_ids=ACallIds
-                                                         ,agent_call_queue=ACtrlQ
                                                         }=State) ->
     lager:debug("member bridged to agent!"),
     maybe_start_recording(Call, ShouldRecord, RecordingUrl),
 
-    [begin
-         lager:debug("cancelling leg ~s", [ACancelId]),
-         acdc_util:unbind_from_call_events(ACancelId),
-         stop_agent_leg(MyQ, ACancelId, ACtrlQ)
-     end || ACancelId <- ACallIds, ACancelId =/= ACallId
-    ],
+    ACallIds1 = filter_agent_calls(ACallIds, ACallId),
+
+    lager:debug("new agent call ids: ~p", [ACallIds1]),
 
     send_member_connect_accepted(AmqpQueue, call_id(Call), AcctId, AgentId, MyId),
-    {'noreply', State#state{agent_call_ids=[ACallId]}, 'hibernate'};
+    {'noreply', State#state{agent_call_ids=ACallIds1}, 'hibernate'};
 
 handle_cast({'member_connect_resp', ReqJObj}, #state{agent_id=AgentId
                                                      ,last_connect=LastConn
@@ -668,6 +674,10 @@ handle_cast({'originate_execute', JObj}, #state{my_q=Q}=State) ->
     lager:debug("execute the originate for agent: ~p", [JObj]),
     send_originate_execute(JObj, Q),
     {'noreply', State, 'hibernate'};
+
+handle_cast({'originate_uuid', UUID, CtlQ}, #state{agent_call_ids=ACallIds}=State) ->
+    lager:debug("updating ~s with ~s in ~p", [UUID, CtlQ, ACallIds]),
+    {'noreply', State#state{agent_call_ids=[{UUID, CtlQ} | props:delete(UUID, ACallIds)]}};
 
 handle_cast({'outbound_call', CallId}, State) ->
     _ = wh_util:put_callid(CallId),
@@ -746,11 +756,13 @@ handle_cast({'presence_update', PresenceState}, #state{acct_id=AcctId
                                                        ,agent_presence_id='undefined'
                                                        ,agent_id=AgentId
                                                       }=State) ->
+    lager:debug("no custom presence id, using ~s for ~s", [AgentId, PresenceState]),
     acdc_util:presence_update(AcctId, AgentId, PresenceState),
     {'noreply', State};
 handle_cast({'presence_update', PresenceState}, #state{acct_id=AcctId
                                                        ,agent_presence_id=PresenceId
                                                       }=State) ->
+    lager:debug("custom presence id, using ~s for ~s", [PresenceId, PresenceState]),
     acdc_util:presence_update(AcctId, PresenceId, PresenceState),
     {'noreply', State};
 
@@ -1178,15 +1190,15 @@ is_thief(Agent) -> not wh_json:is_json_object(Agent).
 
 handle_fsm_started(_FSMPid) -> gen_listener:cast(self(), 'bind_to_member_reqs').
 
-stop_agent_leg('undefined', _, _) -> 'ok';
-stop_agent_leg(_, 'undefined', _) -> 'ok';
-stop_agent_leg(_, _, 'undefined') -> 'ok';
-stop_agent_leg(MyQ, ACallId, ACtrlQ) ->
+stop_agent_leg('undefined', _) -> lager:debug("agent call id not defined");
+stop_agent_leg(_, 'undefined') -> lager:debug("agent ctrl queue not defined");
+stop_agent_leg(ACallId, ACtrlQ) ->
     Command = [{<<"Application-Name">>, <<"hangup">>}
                ,{<<"Insert-At">>, <<"now">>}
                ,{<<"Call-ID">>, ACallId}
-               | wh_api:default_headers(MyQ, <<"call">>, <<"command">>, ?APP_NAME, ?APP_VERSION)
+               | wh_api:default_headers(<<>>, <<"call">>, <<"command">>, ?APP_NAME, ?APP_VERSION)
               ],
+    lager:debug("sending hangup to ~s: ~s", [ACallId, ACtrlQ]),
     wapi_dialplan:publish_command(ACtrlQ, Command).
 
 find_account_id(JObj) ->
@@ -1194,3 +1206,20 @@ find_account_id(JObj) ->
         'undefined' -> wh_util:format_account_id(wh_json:get_value(<<"pvt_account_db">>, JObj), 'raw');
         AcctId -> AcctId
     end.
+
+-spec filter_agent_calls(wh_proplist(), ne_binary()) -> wh_proplist().
+filter_agent_calls(ACallIds, ACallId) ->
+    lists:filter(fun({ACancelId, ACtrlQ}) when ACancelId =/= ACallId ->
+                         lager:debug("cancelling and stopping leg ~s", [ACancelId]),
+                         acdc_util:unbind_from_call_events(ACancelId),
+                         stop_agent_leg(ACancelId, ACtrlQ),
+                         'false';
+                    ({_, _}) -> 'true';
+                    (ACancelId) when ACancelId =/= ACallId ->
+                         lager:debug("cancelling leg ~s", [ACancelId]),
+                         acdc_util:unbind_from_call_events(ACancelId),
+                         'false';
+                    (_A) ->
+                         lager:debug("ignoring ~p", [_A]),
+                         'true'
+                 end, ACallIds).

@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%%% @copyright (C) 2010-2012, VoIP INC
+%%% @copyright (C) 2010-2013, 2600Hz
 %%% @doc
 %%% Various utilities specific to ecallmgr. More general utilities go
 %%% in whistle_util.erl
@@ -17,7 +17,8 @@
 -export([export/3]).
 -export([get_expires/1]).
 -export([get_interface_properties/1, get_interface_properties/2]).
--export([get_sip_to/1, get_sip_from/1, get_sip_request/1, get_orig_ip/1, custom_channel_vars/1]).
+-export([get_sip_to/1, get_sip_from/1, get_sip_request/1, get_orig_ip/1]).
+-export([custom_channel_vars/1, custom_channel_vars/2]).
 -export([eventstr_to_proplist/1, varstr_to_proplist/1, get_setting/1, get_setting/2]).
 -export([is_node_up/1, is_node_up/2]).
 -export([build_bridge_string/1, build_bridge_string/2]).
@@ -116,50 +117,17 @@ send_cmd(Node, _UUID, "call_pickup", Args) ->
 send_cmd(Node, UUID, "hangup", _) ->
     lager:debug("terminate call on node ~s", [Node]),
     freeswitch:api(Node, 'uuid_kill', wh_util:to_list(UUID));
-send_cmd(Node, UUID, "set", "ecallmgr_Account-ID=" ++ _ = Args) ->
-    _ = maybe_update_channel_cache(Args, UUID),
-    send_cmd(Node, UUID, "export", Args);
-send_cmd(Node, UUID, "set", "ecallmgr_Precedence=" ++ _ = Args) ->
-    _ = maybe_update_channel_cache(Args, UUID),
-    send_cmd(Node, UUID, "export", Args);
 send_cmd(Node, UUID, "conference", Args) ->
     Args1 = iolist_to_binary([UUID, " conference:", Args, ",park inline"]),
     lager:debug("starting conference on ~s: ~s", [Node, Args1]),
     freeswitch:api(Node, 'uuid_transfer', wh_util:to_list(Args1));
 send_cmd(Node, UUID, AppName, Args) ->
-    _ = maybe_update_channel_cache(Args, UUID),
     Result = freeswitch:sendmsg(Node, UUID, [{"call-command", "execute"}
                                              ,{"execute-app-name", AppName}
                                              ,{"execute-app-arg", wh_util:to_list(Args)}
                                             ]),
     lager:debug("execute on node ~s ~s(~s): ~p", [Node, AppName, Args, Result]),
     Result.
-
--spec maybe_update_channel_cache(string(), ne_binary()) -> 'ok'.
-maybe_update_channel_cache("ecallmgr_Account-ID=" ++ Value, UUID) ->
-    ecallmgr_fs_channel:set_account_id(UUID, Value);
-maybe_update_channel_cache("ecallmgr_Billing-ID=" ++ Value, UUID) ->
-    ecallmgr_fs_channel:set_billing_id(UUID, Value);
-maybe_update_channel_cache("ecallmgr_Account-Billing=" ++ Value, UUID) ->
-    ecallmgr_fs_channel:set_account_billing(UUID, Value);
-maybe_update_channel_cache("ecallmgr_Reseller-ID=" ++ Value, UUID) ->
-    ecallmgr_fs_channel:set_reseller_id(UUID, Value);
-maybe_update_channel_cache("ecallmgr_Reseller-Billing=" ++ Value, UUID) ->
-    ecallmgr_fs_channel:set_reseller_billing(UUID, Value);
-maybe_update_channel_cache("ecallmgr_Authorizing-ID=" ++ Value, UUID) ->
-    ecallmgr_fs_channel:set_authorizing_id(UUID, Value);
-maybe_update_channel_cache("ecallmgr_Resource-ID=" ++ Value, UUID) ->
-    ecallmgr_fs_channel:set_resource_id(UUID, Value);
-maybe_update_channel_cache("ecallmgr_Authorizing-Type=" ++ Value, UUID) ->
-    ecallmgr_fs_channel:set_authorizing_type(UUID, Value);
-maybe_update_channel_cache("ecallmgr_Owner-ID=" ++ Value, UUID) ->
-    ecallmgr_fs_channel:set_owner_id(UUID, Value);
-maybe_update_channel_cache("ecallmgr_Presence-ID=" ++ Value, UUID) ->
-    ecallmgr_fs_channel:set_presence_id(UUID, Value);
-maybe_update_channel_cache("ecallmgr_Precedence=" ++ Value, UUID) ->
-    ecallmgr_fs_channel:set_precedence(UUID, Value);
-maybe_update_channel_cache(_, _) ->
-    'ok'.
 
 -spec get_expires(wh_proplist()) -> integer().
 get_expires(Props) ->
@@ -188,33 +156,50 @@ get_interface_properties(Node, Interface) ->
 
 %% retrieves the sip address for the 'to' field
 -spec get_sip_to(wh_proplist()) -> ne_binary().
-get_sip_to(Prop) ->
-    list_to_binary([props:get_value(<<"sip_to_user">>, Prop
-                                    ,props:get_value(<<"variable_sip_to_user">>, Prop, "nouser"))
-                    ,"@"
-                    ,props:get_value(<<"sip_to_host">>, Prop
-                                      ,props:get_value(<<"variable_sip_to_host">>, Prop, ?DEFAULT_DOMAIN))
-                   ]).
+get_sip_to(Props) ->
+    get_sip_to(Props, props:get_value(<<"Call-Direction">>, Props)).
+get_sip_to(Props, <<"outbound">>) ->
+    case props:get_value(<<"Channel-Presence-ID">>, Props) of
+        'undefined' -> get_sip_request(Props);
+        PresenceId -> PresenceId
+    end;
+get_sip_to(Props, _) ->
+    case props:get_value(<<"variable_sip_to_uri">>, Props) of
+        'undefined' -> get_sip_request(Props);
+        ToUri -> ToUri
+    end.
 
 %% retrieves the sip address for the 'from' field
 -spec get_sip_from(wh_proplist()) -> ne_binary().
-get_sip_from(Prop) ->
-    list_to_binary([props:get_value(<<"sip_from_user">>, Prop
-                                    ,props:get_value(<<"variable_sip_from_user">>, Prop, "nouser"))
-                    ,"@"
-                    ,props:get_value(<<"sip_from_host">>, Prop
-                                      ,props:get_value(<<"variable_sip_from_host">>, Prop, ?DEFAULT_DOMAIN))
-                   ]).
+get_sip_from(Props) ->
+    get_sip_from(Props, props:get_value(<<"Call-Direction">>, Props)).
+get_sip_from(Props, <<"outbound">>) ->
+    Number = props:get_value(<<"Other-Leg-Destination-Number">>, Props, <<"nonumber">>),
+    Realm = props:get_first_defined([?GET_CCV(<<"Realm">>)
+                                     ,<<"variable_sip_auth_realm">>
+                                    ], Props, ?DEFAULT_REALM),
+    <<Number/binary, "@", Realm/binary>>;
+get_sip_from(Props, _) ->
+    Default = <<(props:get_value(<<"sip_from_user">>, Props, <<"nouser">>))/binary
+                ,"@"
+                ,(props:get_value(<<"sip_from_host">>, Props, ?DEFAULT_REALM))/binary
+              >>,
+    props:get_first_defined([<<"Channel-Presence-ID">>
+                             ,<<"variable_sip_from_uri">>
+                            ], Props, Default).
 
 %% retrieves the sip address for the 'request' field
 -spec get_sip_request(wh_proplist()) -> ne_binary().
-get_sip_request(Prop) ->
-    list_to_binary([props:get_value(<<"Hunt-Destination-Number">>, Prop
-                                    ,props:get_value(<<"Caller-Destination-Number">>, Prop, "nouser"))
-                    ,"@"
-                    ,props:get_value(list_to_binary(["variable_", ?CHANNEL_VAR_PREFIX, "Realm"]), Prop
-                                                 ,props:get_value(<<"variable_sip_auth_realm">>, Prop, ?DEFAULT_DOMAIN))
-                   ]).
+get_sip_request(Props) ->
+    User = props:get_first_defined([<<"Hunt-Destination-Number">>
+                                    ,<<"Caller-Destination-Number">>
+                                    ,<<"sip_to_user">>
+                                   ], Props, <<"nouser">>),
+    Realm = props:get_first_defined([?GET_CCV(<<"Realm">>)
+                                     ,<<"variable_sip_auth_realm">>
+                                     ,<<"sip_to_host">>
+                                    ], Props, ?DEFAULT_REALM),
+    <<User/binary, "@", Realm/binary>>.
 
 -spec get_orig_ip(wh_proplist()) -> ne_binary().
 get_orig_ip(Prop) ->
@@ -222,13 +207,17 @@ get_orig_ip(Prop) ->
 
 %% Extract custom channel variables to include in the event
 -spec custom_channel_vars(wh_proplist()) -> wh_proplist().
-custom_channel_vars(Prop) ->
+-spec custom_channel_vars(wh_proplist(), wh_proplist()) -> wh_proplist().
+custom_channel_vars(Props) ->
+    custom_channel_vars(Props, []).
+
+custom_channel_vars(Props, Initial) ->
     lists:foldl(fun({<<"variable_", ?CHANNEL_VAR_PREFIX, Key/binary>>, V}, Acc) -> [{Key, V} | Acc];
                    ({<<?CHANNEL_VAR_PREFIX, Key/binary>>, V}, Acc) -> [{Key, V} | Acc];
                    ({<<"variable_sip_h_Referred-By">>, V}, Acc) -> [{<<"Referred-By">>, wh_util:to_binary(mochiweb_util:unquote(V))} | Acc];
                    ({<<"variable_sip_refer_to">>, V}, Acc) -> [{<<"Referred-To">>, wh_util:to_binary(mochiweb_util:unquote(V))} | Acc];
                    (_, Acc) -> Acc
-                end, [], Prop).
+                end, Initial, Props).
 
 %% convert a raw FS string of headers to a proplist
 %% "Event-Name: NAME\nEvent-Timestamp: 1234\n" -> [{<<"Event-Name">>, <<"NAME">>}, {<<"Event-Timestamp">>, <<"1234">>}]
@@ -289,6 +278,18 @@ get_fs_kv(Key, Val, _) ->
             V = maybe_sanitize_fs_value(Key, Val),
             list_to_binary([Prefix, "=", wh_util:to_list(V), ""])
     end.
+
+-spec get_fs_key_and_value(ne_binary(), ne_binary(), ne_binary()) -> {ne_binary(), binary()}.
+get_fs_key_and_value(<<"Hold-Media">>, Media, UUID) ->
+    {<<"hold_music">>, media_path(Media, 'extant', UUID, wh_json:new())};
+get_fs_key_and_value(Key, Val, _UUID) ->
+    case lists:keyfind(Key, 1, ?SPECIAL_CHANNEL_VARS) of
+        'false' ->
+            {list_to_binary([?CHANNEL_VAR_PREFIX, Key]), Val};
+        {_, Prefix} ->
+            {Prefix, maybe_sanitize_fs_value(Key, Val)}
+    end.
+
 %%--------------------------------------------------------------------
 %% @private
 %% @doc
@@ -296,13 +297,13 @@ get_fs_kv(Key, Val, _) ->
 %%--------------------------------------------------------------------
 -spec maybe_sanitize_fs_value(text(), text()) -> binary().
 maybe_sanitize_fs_value(<<"Outbound-Caller-ID-Name">>, Val) ->
-    re:replace(Val, <<"[^a-zA-Z0-9\s]">>, <<"">>, [global, {return, binary}]);
+    re:replace(Val, <<"[^a-zA-Z0-9\s]">>, <<>>, ['global', {'return', 'binary'}]);
 maybe_sanitize_fs_value(<<"Outbound-Callee-ID-Name">>, Val) ->
-    re:replace(Val, <<"[^a-zA-Z0-9\s]">>, <<"">>, [global, {return, binary}]);
+    re:replace(Val, <<"[^a-zA-Z0-9\s]">>, <<>>, ['global', {'return', 'binary'}]);
 maybe_sanitize_fs_value(<<"Caller-ID-Name">>, Val) ->
-    re:replace(Val, <<"[^a-zA-Z0-9\s]">>, <<"">>, [global, {return, binary}]);
+    re:replace(Val, <<"[^a-zA-Z0-9\s]">>, <<>>, ['global', {'return', 'binary'}]);
 maybe_sanitize_fs_value(<<"Callee-ID-Name">>, Val) ->
-    re:replace(Val, <<"[^a-zA-Z0-9\s]">>, <<"">>, [global, {return, binary}]);
+    re:replace(Val, <<"[^a-zA-Z0-9\s]">>, <<>>, ['global', {'return', 'binary'}]);
 maybe_sanitize_fs_value(Key, Val) when not is_binary(Key) ->
     maybe_sanitize_fs_value(wh_util:to_binary(Key), Val);
 maybe_sanitize_fs_value(Key, Val) when not is_binary(Val) ->
@@ -314,43 +315,41 @@ maybe_sanitize_fs_value(_, Val) -> Val.
 %% @doc
 %% @end
 %%--------------------------------------------------------------------
--spec set(atom(), ne_binary(), wh_proplist() | ne_binary()) ->
+-spec set(atom(), ne_binary(), wh_proplist()) ->
                  ecallmgr_util:send_cmd_ret().
 set(_, _, []) -> 'ok';
 set(Node, UUID, [{<<"Auto-Answer", _/binary>> = K, V}]) ->
-    _ = send_cmd(Node, UUID, "set", "alert_info=intercom"),
-    send_cmd(Node, UUID, "set", get_fs_kv(K, V, UUID));
+    ecallmgr_fs_command:set(Node, UUID, [{<<"alert_info">>, <<"intercom">>}, get_fs_key_and_value(K, V, UUID)]);
 set(Node, UUID, [{K, V}]) ->
-    set(Node, UUID, get_fs_kv(K, V, UUID));
+    ecallmgr_fs_command:set(Node, UUID, [get_fs_key_and_value(K, V, UUID)]);
 set(Node, UUID, [{_, _}|_]=Props) ->
     Multiset = lists:foldl(fun({<<"Auto-Answer", _/binary>> = K, V}, Acc) ->
-                                   <<"|alert_info=intercom|"
-                                     ,(get_fs_kv(K, V, UUID))/binary
-                                     ,Acc/binary>>;
+                                   [{<<"alert_info">>, <<"intercom">>}
+                                    ,get_fs_key_and_value(K, V, UUID)
+                                    | Acc
+                                   ];
                               ({K, V}, Acc) ->
-                                   <<"|", (get_fs_kv(K, V, UUID))/binary, Acc/binary>>
-                           end, <<>>, Props),
-    send_cmd(Node, UUID, "multiset", <<"^^", Multiset/binary>>);
-set(Node, UUID, Arg) ->
-    send_cmd(Node, UUID, "set", Arg).
+                                   [get_fs_key_and_value(K, V, UUID) | Acc]
+                           end, [], Props),
+    ecallmgr_fs_command:set(Node, UUID, Multiset).
 
 %%--------------------------------------------------------------------
 %% @private
 %% @doc
 %% @end
 %%--------------------------------------------------------------------
--spec export(atom(), ne_binary(), wh_proplist() | binary()) ->
+-spec export(atom(), ne_binary(), wh_proplist()) ->
                     ecallmgr_util:send_cmd_ret().
 export(_, _, []) -> 'ok';
-export(Node, UUID, [{<<"Auto-Answer", _/binary>> = K, V}|Props]) ->
-    _ = send_cmd(Node, UUID, "export", "alert_info=intercom"),
-    _ = send_cmd(Node, UUID, "export", get_fs_kv(K, V, UUID)),
-    export(Node, UUID, Props);
-export(Node, UUID, [{K, V}|Props]) ->
-    _ = send_cmd(Node, UUID, "export", get_fs_kv(K, V, UUID)),
-    export(Node, UUID, Props);
-export(Node, UUID, Arg) ->
-    send_cmd(Node, UUID, "export", wh_util:to_list(Arg)).
+export(Node, UUID, [{<<"Auto-Answer", _/binary>> = K, V} | Props]) ->
+    Exports = [get_fs_key_and_value(Key, Val, UUID) || {Key, Val} <- Props],
+    ecallmgr_fs_command:export(Node, UUID, [{<<"alert_info">>, <<"intercom">>}
+                                            ,get_fs_key_and_value(K, V, UUID)
+                                            | Exports
+                                           ]);
+export(Node, UUID, Props) ->
+    Exports = [get_fs_key_and_value(Key, Val, UUID) || {Key, Val} <- Props],
+    ecallmgr_fs_command:export(Node, UUID, Exports).
 
 %%--------------------------------------------------------------------
 %% @public

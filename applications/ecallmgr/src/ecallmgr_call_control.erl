@@ -1,5 +1,5 @@
 %%%%-------------------------------------------------------------------
-%%% @copyright (C) 2010-2012, VoIP INC
+%%% @copyright (C) 2010-2013, 2600Hz
 %%% @doc
 %%% Created when a call hits a fetch_handler in ecallmgr_route.
 %%% A Control Queue is created by the lookup_route function in the
@@ -85,21 +85,28 @@
          ,self :: 'undefined' | pid()
          ,command_q = queue:new() :: queue()
          ,current_app :: api_binary()
-         ,current_cmd :: wh_json:object() | 'undefined'
+         ,current_cmd :: api_object()
          ,start_time = erlang:now() :: wh_now()
          ,is_call_up = 'true' :: boolean()
          ,is_node_up = 'true' :: boolean()
-         ,keep_alive_ref :: 'undefined' | reference()
+         ,keep_alive_ref :: api_reference()
          ,other_legs = [] :: ne_binaries()
          ,last_removed_leg :: api_binary()
-         ,sanity_check_tref = 'undefined' :: 'undefined' | reference()
+         ,sanity_check_tref :: api_reference()
          ,msg_id :: api_binary()
-         ,billing_id :: api_binary()
+         ,fetch_id :: api_binary()
          }).
 
--define(RESPONDERS, [{{?MODULE, 'handle_call_command'}, [{<<"call">>, <<"command">>}]}
-                     ,{{?MODULE, 'handle_conference_command'}, [{<<"conference">>, <<"command">>}]}
-                     ,{{?MODULE, 'handle_call_events'}, [{<<"call_event">>, <<"*">>}]}]).
+-define(RESPONDERS, [{{?MODULE, 'handle_call_command'}
+                      ,[{<<"call">>, <<"command">>}]
+                     }
+                     ,{{?MODULE, 'handle_conference_command'}
+                       ,[{<<"conference">>, <<"command">>}]
+                      }
+                     ,{{?MODULE, 'handle_call_events'}
+                       ,[{<<"call_event">>, <<"*">>}]
+                      }
+                    ]).
 -define(QUEUE_NAME, <<>>).
 -define(QUEUE_OPTIONS, []).
 -define(CONSUME_OPTIONS, []).
@@ -116,7 +123,7 @@
 %% @end
 %%--------------------------------------------------------------------
 -spec start_link(atom(), ne_binary(), api_binary()) -> startlink_ret().
-start_link(Node, CallId, BillingId) ->
+start_link(Node, CallId, FetchId) ->
     %% We need to become completely decoupled from ecallmgr_call_events
     %% because the call_events process might have been spun up with A->B
     %% then transfered to A->D, but the route landed in a different
@@ -135,7 +142,7 @@ start_link(Node, CallId, BillingId) ->
                                       ,{'queue_options', ?QUEUE_OPTIONS}
                                       ,{'consume_options', ?CONSUME_OPTIONS}
                                      ]
-                            ,[Node, CallId, BillingId]).
+                            ,[Node, CallId, FetchId]).
 
 -spec stop(pid()) -> 'ok'.
 stop(Srv) ->
@@ -217,7 +224,7 @@ handle_call_events(JObj, Props) ->
 %%                     {stop, Reason}
 %% @end
 %%--------------------------------------------------------------------
-init([Node, CallId, BillingId]) ->
+init([Node, CallId, FetchId]) ->
     put('callid', CallId),
     lager:debug("starting call control listener"),
     gen_listener:cast(self(), 'init'),
@@ -226,7 +233,7 @@ init([Node, CallId, BillingId]) ->
                   ,command_q=queue:new()
                   ,self=self()
                   ,start_time=erlang:now()
-                  ,billing_id=BillingId
+                  ,fetch_id=FetchId
                  }}.
 
 %%--------------------------------------------------------------------
@@ -417,7 +424,7 @@ handle_cast(_, State) ->
 %% @end
 %%--------------------------------------------------------------------
 handle_info({'event', [CallId | Props]}, #state{callid=CallId
-                                                ,billing_id=BillingId}=State) ->
+                                                ,fetch_id=FetchId}=State) ->
     JObj = ecallmgr_call_events:to_json(Props),
     Application = wh_json:get_value(<<"Application-Name">>, JObj),
     case props:get_value(<<"Event-Subclass">>, Props, props:get_value(<<"Event-Name">>, Props)) of
@@ -434,8 +441,8 @@ handle_info({'event', [CallId | Props]}, #state{callid=CallId
             gen_listener:cast(self(), {'channel_destroyed', CallId, JObj}),
             {'noreply', State};
         <<"sofia::transferee">> ->
-            case props:get_value(?GET_CCV(<<"Billing-ID">>), Props) of
-                BillingId ->
+            case props:get_value(?GET_CCV(<<"Fetch-ID">>), Props) of
+                FetchId ->
                     lager:info("we have been transfered, terminate immediately", []),
                     {'stop', 'normal', State};
                 _Else ->
@@ -443,12 +450,12 @@ handle_info({'event', [CallId | Props]}, #state{callid=CallId
                     {'noreply', State}
             end;
         <<"sofia::replaced">> ->
-            case props:get_value(?GET_CCV(<<"Billing-ID">>), Props) of
-                BillingId ->
+            case props:get_value(?GET_CCV(<<"Fetch-ID">>), Props) of
+                FetchId ->
                     ReplacedBy = props:get_value(<<"att_xfer_replaced_by">>, Props),
                     {'noreply', handle_sofia_replaced(ReplacedBy, State)};
                 _Else ->
-                    lager:info("sofia replaced on our channel but different billing id~n"),
+                    lager:info("sofia replaced on our channel but different fetch id~n"),
                     {'noreply', State}
             end;
         <<"CHANNEL_EXECUTE">> when Application =:= <<"redirect">> ->
@@ -734,8 +741,10 @@ insert_command(#state{node=Node
             execute_control_request(JObj, State),
             CommandQ
     end;
-insert_command(_, 'flush', JObj) ->
+insert_command(#state{node=Node, callid=CallId}, 'flush', JObj) ->
     lager:debug("received control queue flush command, clearing all waiting commands"),
+    freeswitch:api(Node, 'uuid_break', <<CallId/binary>>),
+    self() ! {'force_queue_advance', CallId},
     insert_command_into_queue(queue:new(), 'tail', JObj);
 insert_command(#state{command_q=CommandQ}, 'head', JObj) ->
     insert_command_into_queue(CommandQ, 'head', JObj);

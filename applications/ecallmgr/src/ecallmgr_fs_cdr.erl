@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%%% @copyright (C) 2012, VoIP INC
+%%% @copyright (C) 2012-2013, 2600Hz
 %%% @doc
 %%% 
 %%% @end
@@ -12,9 +12,7 @@
 -export([start_link/1
          ,start_link/2
         ]).
--export([publish/2
-         ,publish/3
-        ]).
+-export([publish/2]).
 -export([init/1
          ,handle_call/3
          ,handle_cast/2
@@ -89,25 +87,10 @@ start_link(Node, Options) ->
 %% @end
 %%--------------------------------------------------------------------
 init([Node, Options]) ->
-    put(callid, Node),
+    put('callid', Node),
     lager:info("starting new fs cdr listener for ~s", [Node]),
-    case bind_to_events(props:get_value(client_version, Options), Node) of
-        ok -> {ok, #state{node=Node, options=Options}};
-        {error, Reason} -> 
-            lager:critical("unable to establish cdr bindings", []),
-            {stop, Reason}
-    end.
-
-bind_to_events(<<"mod_kazoo", _/binary>>, Node) ->
-    case freeswitch:event(Node, ['CHANNEL_HANGUP_COMPLETE']) of
-        timeout -> {error, timeout};
-        Else -> Else
-    end;
-bind_to_events(_, Node) ->
-    case gproc:reg({p, l, {event, Node, <<"CHANNEL_HANGUP_COMPLETE">>}}) =:= true of
-        true -> ok;
-        false -> {error, gproc_badarg}
-    end.
+    gen_server:cast(self(), 'bind_to_events'),
+    {'ok', #state{node=Node, options=Options}}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -124,7 +107,7 @@ bind_to_events(_, Node) ->
 %% @end
 %%--------------------------------------------------------------------
 handle_call(_Request, _From, State) ->
-    {reply, {error, not_implemented}, State}.
+    {'reply', {'error', 'not_implemented'}, State}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -136,8 +119,13 @@ handle_call(_Request, _From, State) ->
 %%                                  {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+handle_cast('bind_to_events', #state{node=Node}=State) ->
+    case gproc:reg({'p', 'l', {'event', Node, <<"CHANNEL_HANGUP_COMPLETE">>}}) =:= 'true' of
+        'true' -> {'noreply', State};
+        'false' -> {'stop', 'gproc_badarg', State}
+    end;
 handle_cast(_Msg, State) ->
-    {noreply, State}.
+    {'noreply', State}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -149,15 +137,12 @@ handle_cast(_Msg, State) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_info({event, [UUID | Props]}, State) ->
-    AMQPConsumer = wh_amqp_channel:consumer_pid(),
-    spawn(?MODULE, publish, [UUID, Props, AMQPConsumer]),
-    {noreply, State};
-handle_info({'tcp', _, Data}, State) ->
-    Event = binary_to_term(Data),
-   handle_info(Event, State);
+handle_info({'event', [UUID | Props]}, State) ->
+    spawn(?MODULE, 'publish', [UUID, Props]),
+    {'noreply', State};
 handle_info(_Info, State) ->
-    {noreply, State}.
+    lager:debug("unhandled message: ~p", [_Info]),
+    {'noreply', State}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -182,21 +167,20 @@ terminate(_Reason, #state{node=Node}) ->
 %% @end
 %%--------------------------------------------------------------------
 code_change(_OldVsn, State, _Extra) ->
-    {ok, State}.
+    {'ok', State}.
 
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
--spec publish(ne_binary(), wh_proplist(), pid()) -> 'ok'.
+-spec publish(ne_binary(), wh_proplist()) -> 'ok'.
 publish(UUID, Props) ->
-    publish(UUID, Props, self()).
-
-publish(UUID, Props, AMQPConsumer) ->
-    put(callid, UUID),
-    _ = wh_amqp_channel:consumer_pid(AMQPConsumer),
+    put('callid', UUID),
     CDR = create_cdr(Props),
     lager:debug("publising cdr: ~p", [CDR]),
-    wapi_call:publish_cdr(UUID, CDR).
+    wh_amqp_worker:cast(?ECALLMGR_AMQP_POOL
+                        ,CDR
+                        ,fun(P) -> wapi_call:publish_cdr(UUID, P) end
+                       ).
 
 -spec create_cdr(wh_proplist()) -> wh_proplist().
 create_cdr(Props) ->
@@ -215,18 +199,18 @@ add_values(Mappings, BaseProp, ChannelProp) ->
                         [{WK, wh_json:from_list(ecallmgr_util:custom_channel_vars(ChannelProp))} | WApi];
                    ({<<"Event-Date-Timestamp">>=FSKey, WK}, WApi) ->
                         case props:get_value(FSKey, ChannelProp) of
-                            undefined -> WApi;
+                            'undefined' -> WApi;
                             V -> VUnix =  wh_util:unix_seconds_to_gregorian_seconds(wh_util:microseconds_to_seconds(V)),
                                  [{WK, wh_util:to_binary(VUnix)} | WApi]
                         end;
                    ({FSKeys, WK}, WApi) when is_list(FSKeys) ->
                         case get_first_value(FSKeys, ChannelProp) of
-                            undefined -> WApi;
+                            'undefined' -> WApi;
                             V -> [{WK, V} | WApi]
                         end;
                    ({FSKey, WK}, WApi) ->
                         case props:get_value(FSKey, ChannelProp) of
-                            undefined -> WApi;
+                            'undefined' -> WApi;
                             V -> [{WK, wh_util:to_binary(V)} | WApi]
                         end
                 end, BaseProp, Mappings).
@@ -235,6 +219,6 @@ add_values(Mappings, BaseProp, ChannelProp) ->
 get_first_value([], _) -> 'undefined';
 get_first_value([FSKey|T], ChannelProp) ->
     case props:get_value(FSKey, ChannelProp) of
-        undefined -> get_first_value(T, ChannelProp);
+        'undefined' -> get_first_value(T, ChannelProp);
         V -> wh_util:to_binary(V)
     end.

@@ -3,7 +3,6 @@
 -compile([{'parse_transform', 'lager_transform'}]).
 
 -include_lib("whistle/include/wh_types.hrl").
--include_lib("whistle/include/wh_amqp.hrl").
 -include_lib("whistle/include/wh_log.hrl").
 -include_lib("whistle/include/wh_api.hrl").
 
@@ -60,12 +59,12 @@
                   ,owner_id :: api_binary() | '_'
                   ,resource_id :: api_binary() | '$4' | '_'
                   ,presence_id :: api_binary() | '$2' | '_'
-                  ,billing_id :: api_binary() | '$5' | '_'
-                  ,bridge_id :: api_binary() | '$6' | '_'
+                  ,fetch_id :: api_binary() | '$5' | '_'
+                  ,bridge_id :: api_binary() | '$5' | '_'
                   ,reseller_id :: api_binary() | '_'
                   ,reseller_billing :: api_binary() | '_'
-                  ,realm :: api_binary() | '_'
-                  ,username :: api_binary() | '_'
+                  ,realm :: api_binary() | '_' | '$2'
+                  ,username :: api_binary() | '_' | '$1'
                   ,import_moh = 'false' :: boolean() | '_'
                   ,answered = 'true' :: boolean() | '_'
                   ,other_leg :: api_binary() | '$2' | '_'
@@ -81,12 +80,12 @@
 -type channel() :: #channel{}.
 -type channels() :: [channel(),...] | [].
 
--define(DEFAULT_DOMAIN, <<"whistle.2600hz.org">>).
--define(MAX_TIMEOUT_FOR_NODE_RESTART, 10000). % 10 seconds
+-define(DEFAULT_REALM, ecallmgr_config:get(<<"default_realm">>, <<"nodomain.com">>)).
+-define(MAX_TIMEOUT_FOR_NODE_RESTART, ecallmgr_config:get_integer(<<"max_timeout_for_node_restart">>, 10000)). % 10 seconds
 -define(MAX_NODE_RESTART_FAILURES, 3).
 
 %% list of dialplan Application-Names that can execute after a call has hung up
--define(POST_HANGUP_COMMANDS, [<<"store">>, <<"set">>, <<"presence">>, <<"record">>, <<"store_fax">>]). 
+-define(POST_HANGUP_COMMANDS, [<<"store">>, <<"set">>, <<"presence">>, <<"record">>, <<"store_fax">>]).
 
 -define(SANITY_CHECK_PERIOD, 300000).
 
@@ -217,16 +216,20 @@
                           ,<<"CHANNEL_REPLACED">>
                      ]).
 
--define(FS_EVENTS, ['CHANNEL_CREATE', 'CHANNEL_PROGRESS_MEDIA', 'CHANNEL_ANSWER'
+-define(FS_EVENTS, ['CHANNEL_CREATE', 'CHANNEL_PROGRESS_MEDIA', 'CHANNEL_DESTROY'
                     ,'CHANNEL_PARK', 'CHANNEL_ANSWER', 'CALL_UPDATE', 'DETECTED_TONE'
                     ,'DTMF', 'RECORD_START', 'RECORD_STOP', 'CHANNEL_BRIDGE'
                     ,'CHANNEL_UNBRIDGE', 'CHANNEL_EXECUTE', 'CHANNEL_EXECUTE_COMPLETE'
-                    ,'CHANNEL_HANGUP', 'CHANNEL_HANGUP_COMPLETE', 'CHANNEL_DESTROY'
-                    ,'CUSTOM', 'whistle::noop', 'whistle::masquerade'
-                    ,'sofia::transferor', 'sofia::transferee', 'sofia::replaced'
-                    ,'conference::maintenance'
-                    ,?CHANNEL_MOVE_RELEASED_EVENT, ?CHANNEL_MOVE_COMPLETE_EVENT
+                    ,'CHANNEL_HANGUP', 'CHANNEL_HANGUP_COMPLETE', 'CHANNEL_DATA'
                    ]).
+
+-define(FS_CUSTOM_EVENTS, ['whistle::noop', 'whistle::masquerade'
+                           ,'sofia::transferor', 'sofia::transferee'
+                           ,'sofia::replaced', 'sofia::register'
+                           ,'conference::maintenance'
+                           ,?CHANNEL_MOVE_RELEASED_EVENT
+                           ,?CHANNEL_MOVE_COMPLETE_EVENT
+                          ]).
 
 -define(FS_DEFAULT_HDRS, [<<"Event-Name">>, <<"Core-UUID">>, <<"FreeSWITCH-Hostname">>, <<"FreeSWITCH-Switchname">>
                               ,<<"FreeSWITCH-IPv4">>, <<"FreeSWITCH-IPv6">>, <<"Event-Date-Local">>

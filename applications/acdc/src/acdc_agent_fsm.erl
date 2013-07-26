@@ -352,7 +352,7 @@ init([AcctId, AgentId, Supervisor, Props, IsThief]) ->
 max_failures(AcctDb, AcctId) ->
     case couch_mgr:open_cache_doc(AcctDb, AcctId) of
         {'ok', AcctJObj} ->
-            wh_json:get_value(<<"max_connect_failures">>, AcctJObj, ?MAX_FAILURES);
+            wh_json:get_integer_value(<<"max_connect_failures">>, AcctJObj, ?MAX_FAILURES);
         {'error', _} -> ?MAX_FAILURES
     end.
 
@@ -660,8 +660,9 @@ ringing({'originate_ready', JObj}, #state{agent_proc=Srv}=State) ->
     acdc_agent:originate_execute(Srv, JObj),
     {'next_state', 'ringing', State};
 
-ringing({'originate_uuid', ACallId, ACtrlQ}, State) ->
+ringing({'originate_uuid', ACallId, ACtrlQ}, #state{agent_proc=Srv}=State) ->
     lager:debug("recv originate_uuid for agent call ~s(~s)", [ACallId, ACtrlQ]),
+    acdc_agent:originate_uuid(Srv, ACallId, ACtrlQ),
     {'next_state', 'ringing', State};
 
 ringing({'originate_started', ACallId}, #state{agent_proc=Srv
@@ -1268,8 +1269,8 @@ outbound('current_call', _, State) ->
 %%                   {stop, Reason, NewState}
 %% @end
 %%--------------------------------------------------------------------
-handle_event({'refresh', AgentJObj}, StateName, State) ->
-    lager:debug("refresh agent config: ~p", [AgentJObj]),
+handle_event({'refresh', AgentJObj}, StateName, #state{agent_proc=Srv}=State) ->
+    acdc_agent:refresh_config(Srv, wh_json:get_value(<<"queues">>, AgentJObj)),
     {'next_state', StateName, State};
 
 handle_event('load_endpoints', StateName, #state{agent_proc='undefined'}=State) ->
@@ -1482,9 +1483,11 @@ clear_call(#state{connect_failures=Fails
     lager:debug("agent has failed to connect ~b times, logging out", [Fails+1]),
     clear_call(State#state{connect_failures=Fails+1}, 'paused');
 clear_call(#state{connect_failures=Fails
+                  ,max_connect_failures=_MaxFails
                   ,acct_id=AcctId
                   ,agent_id=AgentId
                  }=State, 'failed') ->
+    lager:debug("agent has failed to connect ~b times(~b)", [Fails+1, _MaxFails]),
     acdc_stats:agent_ready(AcctId, AgentId),
     clear_call(State#state{connect_failures=Fails+1}, 'ready');
 clear_call(#state{fsm_call_id=FSMCallId
@@ -1684,7 +1687,8 @@ get_endpoints(OrigEPs, Srv, Call, AgentId) ->
 return_to_state(Fails, MaxFails, _, _) when Fails >= MaxFails ->
     lager:debug("fails ~b max ~b going to pause", [Fails, MaxFails]),
     'paused';
-return_to_state(_, _, AcctId, AgentId) ->
+return_to_state(_Fails, _MaxFails, AcctId, AgentId) ->
+    lager:debug("fails ~b max ~b going to pause", [_Fails, _MaxFails]),
     acdc_stats:agent_ready(AcctId, AgentId),
     'ready'.
 

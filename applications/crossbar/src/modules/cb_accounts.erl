@@ -187,7 +187,7 @@ delete(Context, Account) ->
 %% @end
 %%--------------------------------------------------------------------
 -spec prepare_context(api_binary(), cb_context:context()) -> cb_context:context().
-prepare_context(undefined, Context) ->
+prepare_context('undefined', Context) ->
     Context#cb_context{db_name=?WH_ACCOUNTS_DB};
 prepare_context(Account, Context) ->
     AccountId = wh_util:format_account_id(Account, 'raw'),
@@ -537,6 +537,7 @@ create_new_account_db(#cb_context{db_name=AccountDb}=Context) ->
             _ = load_initial_views(C),
             _ = crossbar_bindings:map(<<"account.created">>, C),
             _ = notfy_new_account(C),
+            _ = wh_services:reconcile(AccountDb),
             C
     end.
 

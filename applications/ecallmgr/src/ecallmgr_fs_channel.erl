@@ -23,6 +23,7 @@
          ,fetch/1
          ,renew/2
          ,to_json/1
+         ,to_props/1
         ]).
 -export([handle_channel_status/2]).
 -export([process_event/3]).
@@ -166,43 +167,44 @@ renew(Node, UUID) ->
 
 -spec to_json(channel()) -> wh_json:object().
 to_json(Channel) ->
-    wh_json:from_list([{<<"uuid">>, Channel#channel.uuid}
-                       ,{<<"destination">>, Channel#channel.destination}
-                       ,{<<"direction">>, Channel#channel.direction}
-                       ,{<<"account_id">>, Channel#channel.account_id}
-                       ,{<<"account_billing">>, Channel#channel.account_billing}
-                       ,{<<"authorizing_id">>, Channel#channel.authorizing_id}
-                       ,{<<"authorizing_type">>, Channel#channel.authorizing_type}
-                       ,{<<"owner_id">>, Channel#channel.owner_id}
-                       ,{<<"resource_id">>, Channel#channel.resource_id}
-                       ,{<<"presence_id">>, Channel#channel.presence_id}
-                       ,{<<"fetch_id">>, Channel#channel.fetch_id}
-                       ,{<<"bridge_id">>, Channel#channel.bridge_id}
-                       ,{<<"precedence">>, Channel#channel.precedence}
-                       ,{<<"reseller_id">>, Channel#channel.reseller_id}
-                       ,{<<"reseller_billing">>, Channel#channel.reseller_billing}
-                       ,{<<"realm">>, Channel#channel.realm}
-                       ,{<<"username">>, Channel#channel.username}
-                       ,{<<"answered">>, Channel#channel.answered}
-                       ,{<<"node">>, Channel#channel.node}
-                       ,{<<"timestamp">>, Channel#channel.timestamp}
-                       ,{<<"profile">>, Channel#channel.profile}
-                       ,{<<"context">>, Channel#channel.context}
-                       ,{<<"dialplan">>, Channel#channel.dialplan}
-                       ,{<<"other_leg">>, Channel#channel.other_leg}
-                      ]).
+    wh_json:from_list(to_props(Channel)).
+
+-spec to_props(channel()) -> wh_proplist().
+to_props(Channel) ->
+    [{<<"uuid">>, Channel#channel.uuid}
+     ,{<<"destination">>, Channel#channel.destination}
+     ,{<<"direction">>, Channel#channel.direction}
+     ,{<<"account_id">>, Channel#channel.account_id}
+     ,{<<"account_billing">>, Channel#channel.account_billing}
+     ,{<<"authorizing_id">>, Channel#channel.authorizing_id}
+     ,{<<"authorizing_type">>, Channel#channel.authorizing_type}
+     ,{<<"owner_id">>, Channel#channel.owner_id}
+     ,{<<"resource_id">>, Channel#channel.resource_id}
+     ,{<<"presence_id">>, Channel#channel.presence_id}
+     ,{<<"fetch_id">>, Channel#channel.fetch_id}
+     ,{<<"bridge_id">>, Channel#channel.bridge_id}
+     ,{<<"precedence">>, Channel#channel.precedence}
+     ,{<<"reseller_id">>, Channel#channel.reseller_id}
+     ,{<<"reseller_billing">>, Channel#channel.reseller_billing}
+     ,{<<"realm">>, Channel#channel.realm}
+     ,{<<"username">>, Channel#channel.username}
+     ,{<<"answered">>, Channel#channel.answered}
+     ,{<<"node">>, Channel#channel.node}
+     ,{<<"timestamp">>, Channel#channel.timestamp}
+     ,{<<"profile">>, Channel#channel.profile}
+     ,{<<"context">>, Channel#channel.context}
+     ,{<<"dialplan">>, Channel#channel.dialplan}
+     ,{<<"other_leg">>, Channel#channel.other_leg}
+    ].
 
 -spec handle_channel_status(wh_json:object(), wh_proplist()) -> 'ok'.
 handle_channel_status(JObj, _Props) ->
     'true' = wapi_call:channel_status_req_v(JObj),
     _ = wh_util:put_callid(JObj),
-
     CallId = wh_json:get_value(<<"Call-ID">>, JObj),
     lager:debug("channel status request received"),
-
-    AllNodesConnected = ecallmgr_fs_nodes:all_nodes_connected(),
     case fetch(CallId) of
-        {'error', 'not_found'} when AllNodesConnected ->
+        {'error', 'not_found'} ->
             lager:debug("no node found with channel ~s", [CallId]),
             Resp = [{<<"Call-ID">>, CallId}
                     ,{<<"Status">>, <<"terminated">>}
@@ -211,8 +213,6 @@ handle_channel_status(JObj, _Props) ->
                     | wh_api:default_headers(?APP_NAME, ?APP_VERSION)
                    ],
             wapi_call:publish_channel_status_resp(wh_json:get_value(<<"Server-ID">>, JObj), Resp);
-        {'error', 'not_found'} ->
-            lager:debug("no node found with channel ~s, but we are not authoritative", [CallId]);
         {'ok', Channel} ->
             channel_status_resp(CallId, Channel, JObj)
     end.
@@ -433,6 +433,7 @@ channel_status_resp(CallId, Channel, JObj) ->
             ,{<<"Status">>, <<"active">>}
             ,{<<"Switch-Hostname">>, Hostname}
             ,{<<"Switch-Nodename">>, wh_util:to_binary(Node)}
+            ,{<<"Switch-URL">>, ecallmgr_fs_nodes:sip_url(Node)}
             ,{<<"Msg-ID">>, wh_json:get_value(<<"Msg-ID">>, JObj)}
             | wh_api:default_headers(?APP_NAME, ?APP_VERSION)
            ],

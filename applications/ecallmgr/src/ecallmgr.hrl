@@ -1,7 +1,5 @@
 -ifndef(ECALLMGR_HRL).
 
--compile([{'parse_transform', 'lager_transform'}]).
-
 -include_lib("whistle/include/wh_types.hrl").
 -include_lib("whistle/include/wh_log.hrl").
 -include_lib("whistle/include/wh_api.hrl").
@@ -9,7 +7,7 @@
 -define(ECALLMGR_AMQP_POOL, 'ecallmgr_amqp_pool').
 
 -define(ECALLMGR_UTIL_CACHE, 'ecallmgr_util_cache').
--define(ECALLMGR_REG_CACHE, 'ecallmgr_reg_cache').
+-define(ECALLMGR_AUTH_CACHE, 'ecallmgr_auth_cache').
 -define(ECALLMGR_CALL_CACHE, 'ecallmgr_call_cache').
 
 -define(CHANNELS_TBL, 'ecallmgr_channels').
@@ -85,7 +83,9 @@
 -define(MAX_NODE_RESTART_FAILURES, 3).
 
 %% list of dialplan Application-Names that can execute after a call has hung up
--define(POST_HANGUP_COMMANDS, [<<"store">>, <<"set">>, <<"presence">>, <<"record">>, <<"store_fax">>]).
+-define(POST_HANGUP_COMMANDS, [<<"store">>, <<"set">>, <<"presence">>
+                               ,<<"record">>, <<"store_fax">>, <<"receive_fax">>
+                              ]).
 
 -define(SANITY_CHECK_PERIOD, 300000).
 
@@ -108,6 +108,8 @@
 
 -define(GET_CCV(Key), <<"variable_", ?CHANNEL_VAR_PREFIX, Key/binary>>).
 -define(SET_CCV(Key, Value), <<?CHANNEL_VAR_PREFIX, Key/binary, "=", Value/binary>>).
+
+-define(CREDS_KEY(Realm, Username), {?MODULE, 'authn', Username, Realm}).
 
 %% Call and Channel Vars that have a special prefix instead of the standard CHANNEL_VAR_PREFIX prefix
 %% [{AMQP-Header, FS-var-name}]

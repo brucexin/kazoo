@@ -49,9 +49,7 @@
 
 %% Query Registrations
 -define(REG_QUERY_HEADERS, [<<"Realm">>]).
--define(OPTIONAL_REG_QUERY_HEADERS, [<<"Username">>, <<"Fields">>
-                                         ,<<"Suppress-Errors">>
-                                    ]).
+-define(OPTIONAL_REG_QUERY_HEADERS, [<<"Username">>, <<"Fields">>]).
 -define(REG_QUERY_VALUES, [{<<"Event-Category">>, <<"directory">>}
                            ,{<<"Event-Name">>, <<"reg_query">>}
                           ]).
@@ -66,7 +64,7 @@
 
 %% Registration Query Response
 -define(REG_QUERY_RESP_HEADERS, [<<"Fields">>]).
--define(OPTIONAL_REG_QUERY_RESP_HEADERS, [<<"Multiple">>]).
+-define(OPTIONAL_REG_QUERY_RESP_HEADERS, [<<"Registrar-Age">>]).
 -define(REG_QUERY_RESP_VALUES, [{<<"Event-Category">>, <<"directory">>}
                                 ,{<<"Event-Name">>, <<"reg_query_resp">>}
                                ]).
@@ -74,7 +72,7 @@
 
 %% Registration Query Error
 -define(REG_QUERY_ERR_HEADERS, []).
--define(OPTIONAL_REG_QUERY_ERR_HEADERS, []).
+-define(OPTIONAL_REG_QUERY_ERR_HEADERS, [<<"Registrar-Age">>]).
 -define(REG_QUERY_ERR_VALUES, [{<<"Event-Category">>, <<"directory">>}
                                 ,{<<"Event-Name">>, <<"reg_query_error">>}
                                ]).

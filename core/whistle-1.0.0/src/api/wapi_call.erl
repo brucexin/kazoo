@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%%% @copyright (C) 2011-2012, VoIP INC
+%%% @copyright (C) 2011-2013, 2600Hz
 %%% @doc
 %%% Call-related messages, like switch events, status requests, etc
 %%% @end
@@ -130,6 +130,7 @@
 -define(CHANNEL_STATUS_RESP_HEADERS, [<<"Call-ID">>, <<"Status">>]).
 -define(OPTIONAL_CHANNEL_STATUS_RESP_HEADERS, [<<"Custom-Channel-Vars">>, <<"Error-Msg">>
                                                    ,<<"Switch-Hostname">>, <<"Switch-Nodename">>
+                                                   ,<<"Switch-URL">>
                                               ]).
 -define(CHANNEL_STATUS_RESP_VALUES, [{<<"Event-Category">>, <<"call_event">>}
                                      ,{<<"Event-Name">>, <<"channel_status_resp">>}
@@ -509,9 +510,6 @@ bind_q(Queue, Props) ->
 bind_q(Q, 'undefined', CallId) ->
     'ok' = amqp_util:bind_q_to_callevt(Q, CallId),
     'ok' = amqp_util:bind_q_to_callevt(Q, CallId, 'cdr'),
-    'ok' = amqp_util:bind_q_to_callmgr(Q, ?NEW_CHANNEL_ROUTING_KEY),
-    'ok' = amqp_util:bind_q_to_callmgr(Q, ?DESTROY_CHANNEL_ROUTING_KEY(CallId)),
-    'ok' = amqp_util:bind_q_to_callmgr(Q, ?ANSWERED_CHANNEL_ROUTING_KEY(CallId)),
     'ok' = amqp_util:bind_q_to_callevt(Q, CallId, 'publisher_usurp');
 
 bind_q(Q, ['events'|T], CallId) ->
@@ -546,9 +544,6 @@ unbind_q(Queue, Props) ->
 unbind_q(Q, 'undefined', CallId) ->
     'ok' = amqp_util:unbind_q_from_callevt(Q, CallId),
     'ok' = amqp_util:unbind_q_from_callevt(Q, CallId, 'cdr'),
-    'ok' = amqp_util:unbind_q_from_callmgr(Q, ?NEW_CHANNEL_ROUTING_KEY),
-    'ok' = amqp_util:unbind_q_from_callmgr(Q, ?DESTROY_CHANNEL_ROUTING_KEY(CallId)),
-    'ok' = amqp_util:unbind_q_from_callmgr(Q, ?ANSWERED_CHANNEL_ROUTING_KEY(CallId)),
     'ok' = amqp_util:unbind_q_from_callevt(Q, CallId, 'publisher_usurp');
 
 unbind_q(Q, ['events'|T], CallId) ->

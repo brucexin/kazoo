@@ -97,7 +97,8 @@
 -define(OPTIONAL_ROUTE_RESP_HEADERS, [<<"Custom-Channel-Vars">>, <<"Routes">>
                                           ,<<"Route-Error-Code">>, <<"Route-Error-Message">>
                                           ,<<"Ringback-Media">>, <<"Transfer-Media">>
-                                          ,<<"Pre-Park">>
+                                          ,<<"Pre-Park">>, <<"From-User">>, <<"From-Realm">>
+                                          ,<<"From-URI">>
                                      ]).
 -define(ROUTE_RESP_VALUES, [{<<"Event-Category">>, ?EVENT_CATEGORY}
                             ,{<<"Event-Name">>, <<"route_resp">>}

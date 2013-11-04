@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%%% @copyright (C) 2011, VoIP INC
+%%% @copyright (C) 2011-2013, 2600Hz INC
 %%% @doc
 %%% API resource
 %%% @end
@@ -65,6 +65,11 @@ rest_init(Req0, Opts) ->
             end,
     put('callid', ReqId),
 
+    ProfileId = case cowboy_req:header(<<"x-profile-id">>, Req0) of
+                    {'undefined', _} -> 'undefined';
+                    {ProfId, _} -> wh_util:to_binary(ProfId)
+                end,
+
     {Host, Req1} = cowboy_req:host(Req0),
     {Port, Req2} = cowboy_req:port(Req1),
     {Path, Req3} = cowboy_req:path(Req2),
@@ -84,6 +89,7 @@ rest_init(Req0, Opts) ->
                   ,resp_error_msg = <<"init failed">>
                   ,resp_error_code = 500
                   ,client_ip = ClientIP
+                  ,profile_id = ProfileId
                  },
 
     {Context1, _} = crossbar_bindings:fold(<<"v1_resource.init">>, {Context0, Opts}),
@@ -101,17 +107,9 @@ rest_terminate(Req, #cb_context{start=T1
     lager:info("OPTIONS request fulfilled in ~p ms", [wh_util:elapsed_ms(T1)]),
     _ = v1_util:finish_request(Req, Context);
 rest_terminate(Req, #cb_context{start=T1
-                                ,resp_status=Status
-                                ,auth_account_id=AcctId
                                 ,req_verb=Verb
                                }=Context) ->
     lager:info("~s request fulfilled in ~p ms", [Verb, wh_util:elapsed_ms(T1)]),
-    case Status of
-        'success' -> wh_counter:inc(<<"crossbar.requests.successes">>);
-        _ -> wh_counter:inc(<<"crossbar.requests.failures">>)
-    end,
-
-    wh_counter:inc(<<"crossbar.requests.accounts.", (wh_util:to_binary(AcctId))/binary>>),
     _ = v1_util:finish_request(Req, Context).
 
 %%%===================================================================
@@ -583,7 +581,15 @@ maybe_flatten_jobj(#cb_context{resp_data=RespData
                               }) ->
     Query = wh_json:to_proplist(JsonQuery),
     case proplists:get_all_values(<<"identifier">>, Query) of
-        [] -> json_objs_to_csv(RespData);
+        [] -> 
+            Routines = [fun(J) -> check_integrity(J) end
+                        ,fun(J) -> create_csv_header(J) end
+                        ,fun(J) -> json_objs_to_csv(J) end
+                       ],
+            lists:foldl(
+              fun(F, J) ->
+                      F(J)
+              end, RespData, Routines);
         Identifier ->
             Depth = wh_json:get_integer_value(<<"depth">>, JsonQuery, 1),
             JObj = wh_json:flatten(RespData, Depth, Identifier),
@@ -596,6 +602,25 @@ maybe_flatten_jobj(#cb_context{resp_data=RespData
                       F(J)
               end, JObj, Routines)
     end.
+
+-spec check_integrity(list()) -> wh_json:objects().
+check_integrity(JObjs) ->
+    Headers = get_headers(JObjs),
+    check_integrity(JObjs, Headers, []).
+
+check_integrity([], _, Acc) ->
+    lists:reverse(Acc);
+check_integrity([JObj|JObjs], Headers, Acc) ->
+    NJObj = lists:foldl(
+              fun(Header, J) ->
+                      case wh_json:get_value(Header, J) of
+                          'undefined' ->
+                              wh_json:set_value(Header, <<"">>, J);
+                          _ -> J
+                      end
+              end, JObj, Headers),
+    NJObj1 = wh_json:from_list(lists:keysort(1, wh_json:to_proplist(NJObj))),
+    check_integrity(JObjs, Headers, [NJObj1|Acc]).
 
 -spec get_headers(wh_json:objects()) -> ne_binaries().
 get_headers(JObjs) ->
@@ -610,25 +635,6 @@ get_headers(JObjs) ->
                         end
                 end, Headers, Keys)
       end, [], JObjs).
-
--spec check_integrity(list()) -> wh_json:objects().
-check_integrity(JObjs) ->
-    Headers = get_headers(JObjs),
-    check_integrity(JObjs, Headers, []).
-
-check_integrity([], _, Acc) ->
-    lists:reverse(Acc);
-check_integrity([JObj|JObjs], Headers, Acc) ->
-    NJObj = lists:foldl(
-              fun(Header, J) ->
-                      case wh_json:get_value(Header, J) of
-                          'undefined' ->
-                              wh_json:set_value(Header, <<"undefined">>, J);
-                          _ -> J
-                      end
-              end, JObj, Headers),
-    NJObj1 = wh_json:from_list(lists:keysort(1, wh_json:to_proplist(NJObj))),
-    check_integrity(JObjs, Headers, [NJObj1|Acc]).
 
 -spec create_csv_header(list()) -> wh_json:objects().
 create_csv_header([]) -> [];

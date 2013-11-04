@@ -12,7 +12,7 @@
 -export([start_link/1
          ,start_link/2
         ]).
--export([publish/2]).
+-export([maybe_publish/3,publish/3]).
 -export([init/1
          ,handle_call/3
          ,handle_cast/2
@@ -47,6 +47,8 @@
                             ,{<<"variable_digits_dialed">>, <<"Digits-Dialed">>}
                             ,{<<"ecallmgr">>, <<"Custom-Channel-Vars">>}
                             ,{fun(P) -> ecallmgr_util:get_sip_request(P) end, <<"Request">>}
+                            ,{fun(P) -> ecallmgr_util:get_sip_to(P) end, <<"To">>}
+                            ,{fun(P) -> ecallmgr_util:get_sip_from(P) end, <<"From">>}
                            ]).
 -define(FS_TO_WHISTLE_OUTBOUND_MAP, [{<<"variable_sip_cid_type">>, <<"Caller-ID-Type">>}]).
 
@@ -137,8 +139,8 @@ handle_cast(_Msg, State) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_info({'event', [UUID | Props]}, State) ->
-    spawn(?MODULE, 'publish', [UUID, Props]),
+handle_info({'event', [UUID | Props]}, #state{node=Node}=State) ->
+    spawn(?MODULE, 'maybe_publish', [UUID, Props, Node]),
     {'noreply', State};
 handle_info(_Info, State) ->
     lager:debug("unhandled message: ~p", [_Info]),
@@ -172,15 +174,41 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
--spec publish(ne_binary(), wh_proplist()) -> 'ok'.
-publish(UUID, Props) ->
-    put('callid', UUID),
+-spec maybe_publish(ne_binary(), wh_proplist(), atom()) -> 'ok'.
+maybe_publish(UUID, Props, Node) ->
+    put('callid', UUID),	
+    ThisNode = wh_util:to_binary(node()),
+    %% NOTE: this will significantly reduce AMQP request however if a ecallmgr
+    %%   becomes disconnected any calls it previsouly controlled will not produce
+    %%   CDRs.  The long-term strategy is to round-robin CDR events from mod_kazoo.
+    case ecallmgr_config:get_boolean(<<"restrict_cdr_publisher">>, 'false') of
+        'false' -> publish(UUID, Props, Node);
+        'true' ->
+            case props:get_value(?GET_CCV(<<"Ecallmgr-Node">>), Props, ThisNode) =:= ThisNode of
+                'true' -> publish(UUID, Props, Node);
+                'false' -> lager:debug("cdr for call controlled by another ecallmgr, not publishing")
+            end
+    end.
+
+-spec publish(ne_binary(), wh_proplist(), atom()) -> 'ok'.
+publish(UUID, Props,_Node) ->
     CDR = create_cdr(Props),
-    lager:debug("publising cdr: ~p", [CDR]),
+    lager:debug("publishing cdr: ~p", [CDR]),
     wh_amqp_worker:cast(?ECALLMGR_AMQP_POOL
                         ,CDR
                         ,fun(P) -> wapi_call:publish_cdr(UUID, P) end
-                       ).
+                       ),
+    case props:get_value(<<"Call-Direction">>,CDR) of
+        <<"inbound">> ->
+            Hangup = props:get_value(<<"Hangup-Cause">>, CDR, <<"unknown">>),
+            whistle_stats:increment_counter(get_realm(Props), Hangup);
+        _ -> 'ok'
+    end.
+
+-spec get_realm(wh_proplist()) -> binary().
+get_realm(Props) ->
+    [_, Realm] = binary:split(ecallmgr_util:get_sip_from(Props), <<"@">>),
+    Realm.  
 
 -spec create_cdr(wh_proplist()) -> wh_proplist().
 create_cdr(Props) ->

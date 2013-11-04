@@ -62,6 +62,7 @@
           ,ref = wh_util:rand_hex_binary(12) :: ne_binary()
           ,passive = 'false' :: boolean()
          }).
+-type state() :: #state{}.
 
 %%%===================================================================
 %%% API
@@ -87,12 +88,14 @@ start_link(Node, CallId) ->
                                       ,{'consume_options', ?CONSUME_OPTIONS}
                                      ], [Node, CallId]).
 
+-spec graceful_shutdown(atom(), ne_binary()) -> 'ok'.
 graceful_shutdown(Node, UUID) ->
     _ = [gen_listener:cast(Pid, {'graceful_shutdown'})
          || Pid <- gproc:lookup_pids({'p', 'l', ?FS_CALL_EVENT_REG_MSG(Node, UUID)})
         ],
     'ok'.
 
+-spec shutdown(atom(), ne_binary()) -> 'ok'.
 shutdown(Node, UUID) ->
     _ = [gen_listener:cast(Pid, 'shutdown')
          || Pid <- gproc:lookup_pids({'p', 'l', ?FS_CALL_EVENT_REG_MSG(Node, UUID)})
@@ -126,7 +129,12 @@ handle_publisher_usurp(JObj, Props) ->
     Ref = props:get_value('reference', Props),
     Node = wh_util:to_binary(props:get_value('node', Props)),
 
-    lager:debug("recieved publisher usurp for ~s on ~s (if ~s != ~s)", [wh_json:get_value(<<"Call-ID">>, JObj), wh_json:get_value(<<"Media-Node">>, JObj), Ref, wh_json:get_value(<<"Reference">>, JObj)]),
+    lager:debug("recieved publisher usurp for ~s on ~s (if ~s != ~s)"
+                ,[wh_json:get_value(<<"Call-ID">>, JObj)
+                  ,wh_json:get_value(<<"Media-Node">>, JObj)
+                  ,Ref
+                  ,wh_json:get_value(<<"Reference">>, JObj)
+                 ]),
 
     case CallId =:= wh_json:get_value(<<"Call-ID">>, JObj)
         andalso Node =:= wh_json:get_value(<<"Media-Node">>, JObj)
@@ -153,7 +161,7 @@ handle_publisher_usurp(JObj, Props) ->
 %%                     {'stop', Reason}
 %% @end
 %%--------------------------------------------------------------------
--spec init([atom() | ne_binary(),...]) -> {'ok', #state{}}.
+-spec init([atom() | ne_binary(),...]) -> {'ok', state()}.
 init([Node, CallId]) when is_atom(Node) andalso is_binary(CallId) ->
     put('callid', CallId),
     gen_listener:cast(self(), 'init'),
@@ -221,7 +229,7 @@ handle_cast({'update_node', Node}, #state{node=OldNode
     _ = gproc:unreg({'p', 'l', ?FS_EVENT_REG_MSG(OldNode, ?CHANNEL_MOVE_RELEASED_EVENT_BIN)}),
     {'noreply', State#state{node=Node}, 0};
 handle_cast({'passive'}, State) ->
-    lager:debug("publisher has been usurp'd by newer process on another ecallmgr, moving to passive mode", []),
+    lager:debug("publisher has been usurp'd by newer process on another ecallmgr, moving to passive mode"),
     {'noreply', State#state{passive='true'}};
 handle_cast({'channel_redirected', Props}, State) ->
     lager:debug("our channel has been redirected, shutting down immediately"),
@@ -272,6 +280,15 @@ handle_info({'event', [CallId | Props]}, #state{node=Node
         {?CHANNEL_MOVE_RELEASED_EVENT_BIN, _} ->
             lager:debug("channel move released call on our node", []),
             {'stop', 'normal', State};
+        {<<"sofia::transferee">>, _} ->
+            process_channel_event(Props),
+            %% NOTE: if we are the transferee upstream apps need
+            %%   to unbind from the C leg call events and bind to
+            %%   our A leg events.  Give them time by buffering 
+            %%   into our mailbox for 1 second...
+            lager:debug("buffering call events for 1 second post transfer"),
+            timer:sleep(1000),
+            {'noreply', State};
         {_, _} ->
             process_channel_event(Props),
             {'noreply', State}
@@ -480,6 +497,7 @@ create_event_props(EventName, ApplicationName, Props) ->
        ,{<<"Other-Leg-Destination-Number">>, props:get_value(<<"Other-Leg-Destination-Number">>, Props)}
        ,{<<"Other-Leg-Unique-ID">>, props:get_value(<<"Other-Leg-Unique-ID">>, Props,
                                                     props:get_value(<<"variable_holding_uuid">>, Props))}
+
        ,{<<"Fax-Success">>, props:get_value(<<"variable_fax_success">>, Props) =/= <<"0">>}
        ,{<<"Fax-Result-Code">>, props:get_value(<<"variable_fax_result_code">>, Props)}
        ,{<<"Fax-Result-Text">>, props:get_value(<<"variable_fax_result_text">>, Props)}
@@ -488,6 +506,7 @@ create_event_props(EventName, ApplicationName, Props) ->
        ,{<<"Fax-Total-Pages">>, props:get_value(<<"variable_fax_document_total_pages">>, Props)}
        ,{<<"Fax-Bad-Rows">>, props:get_value(<<"variable_fax_bad_rows">>, Props)}
        ,{<<"Fax-Transfer-Rate">>, props:get_value(<<"variable_fax_transfer_rate">>, Props)}
+
        ,{<<"Custom-Channel-Vars">>, wh_json:from_list(CCVs)}
        %% this sucks, its leaky but I dont see a better way around it since we need the raw application
        %% name in call_control... (see note in call_control on start_link for why we need to use AMQP
@@ -515,7 +534,6 @@ find_fs_callid(Props, [H|T]) ->
     end;
 find_fs_callid(_, []) -> 'undefined'.
 
-
 -spec is_channel_moving(wh_proplist()) -> boolean().
 is_channel_moving(Props) ->
     wh_util:is_true(props:get_value(<<"variable_channel_is_moving">>, Props)).
@@ -533,7 +551,7 @@ publish_event(Props) ->
     case {ApplicationName, EventName} of
         {_, <<"dtmf">>} ->
             Pressed = props:get_value(<<"DTMF-Digit">>, Props),
-            lager:debug("publishing recevied DTMF digit ~s", [Pressed]);
+            lager:debug("publishing received DTMF digit ~s", [Pressed]);
         {<<>>, _} ->
             lager:debug("publishing call event ~s", [wh_util:to_lower_binary(EventName)]);
         {ApplicationName, <<"channel_execute_complete">>} ->
@@ -595,7 +613,6 @@ event_specific(<<"CHANNEL_EXECUTE_COMPLETE">>, <<"bridge">>, Prop) ->
     [{<<"Application-Name">>, <<"bridge">>}
      ,{<<"Application-Response">>, props:get_value(<<"variable_originate_disposition">>, Prop, <<"FAIL">>)}
     ];
-
 event_specific(<<"CHANNEL_EXECUTE_COMPLETE">>, <<"record">>, Prop) ->
     [{<<"Application-Name">>, <<"bridge">>}
      ,{<<"Application-Response">>, props:get_value(<<"variable_originate_disposition">>, Prop, <<"FAIL">>)}
@@ -756,14 +773,14 @@ get_hangup_cause(Props) ->
 
 -spec get_disposition(wh_proplist()) -> api_binary().
 get_disposition(Props) ->
-    find_event_value([<<"variable_endpoint_disposition">>
-                          ,<<"variable_originate_disposition">>
+    find_event_value([<<"variable_originate_disposition">>
+                      ,<<"variable_endpoint_disposition">>
                      ], Props).
 
 -spec get_hangup_code(wh_proplist()) -> api_binary().
 get_hangup_code(Props) ->
     find_event_value([<<"variable_proto_specific_hangup_cause">>
-                          ,<<"variable_last_bridge_proto_specific_hangup_cause">>
+                      ,<<"variable_last_bridge_proto_specific_hangup_cause">>
                      ], Props).
 
 -spec find_event_value(ne_binaries(), wh_proplist()) -> api_binary().

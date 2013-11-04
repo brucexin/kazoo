@@ -11,6 +11,7 @@
 
 -export([doc_update/1, doc_update_v/1
          ,bind_q/2, unbind_q/2
+         ,declare_exchanges/0
          ,publish_doc_update/5, publish_doc_update/6
          ,get_account_id/1, get_account_db/1
          ,get_type/1, get_doc/1, get_id/1
@@ -75,12 +76,12 @@ get_type(JObj) ->
 %% @end
 %%--------------------------------------------------------------------
 -spec doc_update(api_terms()) ->
-                              {'ok', iolist()} |
-                              {'error', string()}.
+                        {'ok', iolist()} |
+                        {'error', string()}.
 doc_update(Prop) when is_list(Prop) ->
     case doc_update_v(Prop) of
-        true -> wh_api:build_message(Prop, ?CONF_DOC_UPDATE_HEADERS, ?OPTIONAL_CONF_DOC_UPDATE_HEADERS);
-        false -> {error, "Proplist failed validation for document_change"}
+        'true' -> wh_api:build_message(Prop, ?CONF_DOC_UPDATE_HEADERS, ?OPTIONAL_CONF_DOC_UPDATE_HEADERS);
+        'false' -> {'error', "Proplist failed validation for document_change"}
     end;
 doc_update(JObj) ->
     doc_update(wh_json:to_proplist(JObj)).
@@ -93,7 +94,6 @@ doc_update_v(JObj) ->
 
 -spec bind_q(binary(), wh_proplist()) -> 'ok'.
 bind_q(Q, Props) ->
-    amqp_util:configuration_exchange(),
     RoutingKey = get_routing_key(Props),
     amqp_util:bind_q_to_configuration(Q, RoutingKey).
 
@@ -102,14 +102,23 @@ unbind_q(Q, Props) ->
     RoutingKey = get_routing_key(Props),
     amqp_util:unbind_q_from_configuration(Q, RoutingKey).
 
+%%--------------------------------------------------------------------
+%% @doc
+%% declare the exchanges used by this API
+%% @end
+%%--------------------------------------------------------------------
+-spec declare_exchanges() -> 'ok'.
+declare_exchanges() ->
+    amqp_util:configuration_exchange().
+
 -spec get_routing_key(wh_proplist()) -> binary().
 get_routing_key(Props) ->
-    Action = props:get_binary_value(action, Props, <<"*">>), % see conf_action() type below
-    Db = props:get_binary_value(db, Props, <<"*">>),
-    Type = props:get_binary_value(doc_type, Props
-                           ,props:get_value(type, Props, <<"*">>)),
-    Id = props:get_binary_value(doc_id, Props
-                         ,props:get_value(id, Props, <<"*">>)),
+    Action = props:get_binary_value('action', Props, <<"*">>),
+    Db = props:get_binary_value('db', Props, <<"*">>),
+    Type = props:get_binary_value('doc_type', Props
+                                  ,props:get_value('type', Props, <<"*">>)),
+    Id = props:get_binary_value('doc_id', Props
+                                ,props:get_value('id', Props, <<"*">>)),
     amqp_util:document_routing_key(Action, Db, Type, Id).
 
 -spec publish_doc_update(action(), binary(), binary(), binary(), api_terms()) -> 'ok'.
@@ -117,5 +126,5 @@ get_routing_key(Props) ->
 publish_doc_update(Action, Db, Type, Id, JObj) ->
     publish_doc_update(Action, Db, Type, Id, JObj, ?DEFAULT_CONTENT_TYPE).
 publish_doc_update(Action, Db, Type, Id, Change, ContentType) ->
-    {ok, Payload} = wh_api:prepare_api_payload(Change, ?CONF_DOC_UPDATE_VALUES, fun ?MODULE:doc_update/1),
+    {'ok', Payload} = wh_api:prepare_api_payload(Change, ?CONF_DOC_UPDATE_VALUES, fun ?MODULE:doc_update/1),
     amqp_util:document_change_publish(Action, Db, Type, Id, Payload, ContentType).

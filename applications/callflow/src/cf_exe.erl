@@ -51,7 +51,7 @@
 
 -record(state, {call = whapps_call:new() :: whapps_call:call()
                 ,flow = wh_json:new() :: wh_json:object()
-                ,cf_module_pid :: pid()
+                ,cf_module_pid :: {pid(), reference()} | 'undefined'
                 ,status = <<"sane">> :: ne_binary()
                 ,queue :: api_binary()
                 ,self = self()
@@ -73,7 +73,7 @@
 start_link(Call) ->
     CallId = whapps_call:call_id(Call),
     Bindings = [{'call', [{'callid', CallId}
-                          ,{'restrict_to', ['events', 'cdr', 'destroy_channel', 'publisher_usurp']}
+                          ,{'restrict_to', ['events', 'cdr', 'destroy_channel', 'control_usurp']}
                          ]}
                 ,{'self', []}
                ],
@@ -189,11 +189,11 @@ get_all_branch_keys(Call) ->
     get_all_branch_keys(Srv).
 
 -spec attempt(whapps_call:call() | pid()) ->
-                           {'attempt_resp', 'ok'} |
-                           {'attempt_resp', {'error', term()}}.
+                     {'attempt_resp', 'ok'} |
+                     {'attempt_resp', {'error', term()}}.
 -spec attempt(ne_binary(), whapps_call:call() | pid()) ->
-                           {'attempt_resp', 'ok'} |
-                           {'attempt_resp', {'error', term()}}.
+                     {'attempt_resp', 'ok'} |
+                     {'attempt_resp', {'error', term()}}.
 attempt(Srv) -> attempt(<<"_">>, Srv).
 
 attempt(Key, Srv) when is_pid(Srv) ->
@@ -211,9 +211,10 @@ wildcard_is_empty(Call) ->
 
 -spec relay_amqp(wh_json:object(), wh_proplist()) -> any().
 relay_amqp(JObj, Props) ->
-    Pids = [props:get_value('cf_module_pid', Props)
-            | props:get_value('cf_event_pids', Props, [])
-           ],
+    Pids = case props:get_value('cf_module_pid', Props) of
+               P when is_pid(P) -> [P | props:get_value('cf_event_pids', Props, [])];
+               _ -> props:get_value('cf_event_pids', Props, [])
+           end,
     [whapps_call_command:relay_event(Pid, JObj) || Pid <- Pids, is_pid(Pid)].
 
 -spec send_amqp(pid() | whapps_call:call(), api_terms(), wh_amqp_worker:publish_fun()) -> 'ok'.
@@ -311,8 +312,12 @@ handle_call(_Request, _From, State) ->
 %%--------------------------------------------------------------------
 handle_cast({'set_call', Call}, State) ->
     {'noreply', State#state{call=Call}};
-handle_cast({'continue', Key}, #state{flow=Flow}=State) ->
-    lager:info("continuing to child ~s", [Key]),
+handle_cast({'continue', Key}, #state{flow=Flow
+                                      ,cf_module_pid=OldPidRef
+                                     }=State) ->
+    lager:info("continuing to child '~s'", [Key]),
+    maybe_stop_caring(OldPidRef),
+
     case wh_json:get_value([<<"children">>, Key], Flow) of
         'undefined' when Key =:= <<"_">> ->
             lager:info("wildcard child does not exist, we are lost...hanging up"),
@@ -350,7 +355,7 @@ handle_cast({'callid_update', NewCallId}, #state{call=Call}=State) ->
     {'noreply', State#state{call=whapps_call:set_call_id(NewCallId, Call)}};
 handle_cast({'add_event_listener', {M, A}}, #state{call=Call}=State) ->
     lager:debug("trying to start evt listener ~s: ~p", [M, A]),
-    try cf_event_handler_sup:new(M, [whapps_call:clear_helpers(Call) | A]) of
+    try cf_event_handler_sup:new(event_listener_name(Call, M), M, [whapps_call:clear_helpers(Call) | A]) of
         {'ok', P} when is_pid(P) ->
             lager:debug("started event listener ~p from ~s", [P, M]),
             {'noreply', State};
@@ -377,6 +382,9 @@ handle_cast(_Msg, State) ->
     lager:debug("unhandled cast: ~p", [_Msg]),
     {'noreply', State}.
 
+event_listener_name(Call, Module) ->
+    <<(whapps_call:call_id_direct(Call))/binary, "-", (wh_util:to_binary(Module))/binary>>.
+
 %%--------------------------------------------------------------------
 %% @private
 %% @doc
@@ -397,14 +405,38 @@ handle_info('initialize', #state{call=Call}) ->
     {'noreply', #state{call=lists:foldr(fun(F, C) -> F(C) end, Call, Updaters)
                        ,flow=Flow
                       }};
-handle_info({'EXIT', _, 'normal'}, State) ->
-    %% handle normal exits so we dont need a guard on the next clause, cleaner looking...
-    {'noreply', State};
-handle_info({'EXIT', Pid, Reason}, #state{cf_module_pid=Pid, call=Call}=State) ->
+handle_info({'DOWN', Ref, 'process', Pid, 'normal'}, #state{cf_module_pid={Pid, Ref}
+                                                            ,call=Call
+                                                           }=State) ->
+    erlang:demonitor(Ref, ['flush']),
+    lager:debug("cf module ~s down normally", [whapps_call:kvs_fetch('cf_last_action', Call)]),
+    {'noreply', State#state{cf_module_pid='undefined'}};
+
+handle_info({'DOWN', Ref, 'process', Pid, _Reason}, #state{cf_module_pid={Pid, Ref}
+                                                           ,call=Call
+                                                          }=State) ->
+    erlang:demonitor(Ref, ['flush']),
     LastAction = whapps_call:kvs_fetch('cf_last_action', Call),
-    lager:error("action ~s died unexpectedly: ~p", [LastAction, Reason]),
+    lager:error("action ~s died unexpectedly: ~p", [LastAction, _Reason]),
     ?MODULE:continue(self()),
-    {'noreply', State};
+    {'noreply', State#state{cf_module_pid='undefined'}};
+
+handle_info({'EXIT', Pid, 'normal'}, #state{cf_module_pid={Pid, Ref}
+                                            ,call=Call
+                                           }=State) ->
+    erlang:demonitor(Ref, ['flush']),
+    lager:debug("cf module ~s down normally", [whapps_call:kvs_fetch('cf_last_action', Call)]),
+    {'noreply', State#state{cf_module_pid='undefined'}};
+
+handle_info({'EXIT', Pid, _Reason}, #state{cf_module_pid={Pid, Ref}
+                                           ,call=Call
+                                          }=State) ->
+    erlang:demonitor(Ref, ['flush']),
+    LastAction = whapps_call:kvs_fetch('cf_last_action', Call),
+    lager:error("action ~s died unexpectedly: ~p", [LastAction, _Reason]),
+    ?MODULE:continue(self()),
+    {'noreply', State#state{cf_module_pid='undefined'}};
+
 handle_info(_Msg, State) ->
     lager:debug("unhandled message: ~p", [_Msg]),
     {'noreply', State}.
@@ -414,9 +446,8 @@ handle_info(_Msg, State) ->
 %% @doc
 %% @end
 %%--------------------------------------------------------------------
-handle_event(JObj, #state{cf_module_pid=Pid
+handle_event(JObj, #state{cf_module_pid=PidRef
                           ,call=Call
-                          ,queue=ControllerQ
                           ,self=Self
                          }) ->
     CallId = whapps_call:call_id_direct(Call),
@@ -441,23 +472,25 @@ handle_event(JObj, #state{cf_module_pid=Pid
                 end,
             'ignore';
         {{<<"call_event">>, <<"usurp_control">>}, CallId} ->
-            _ = case wh_json:get_value(<<"Controller-Queue">>, JObj) of
-                    ControllerQ -> 'ok';
-                    _Else -> control_usurped(Self)
+            _ = case whapps_call:custom_channel_var(<<"Fetch-ID">>, Call)
+                    =:= wh_json:get_value(<<"Fetch-ID">>, JObj)
+                of
+                    'false' -> control_usurped(Self);
+                    'true' -> 'ok'
                 end,
             'ignore';
         {{<<"error">>, _}, _} ->
             case wh_json:get_value([<<"Request">>, <<"Call-ID">>], JObj) of
-                CallId -> {'reply', [{'cf_module_pid', Pid}
+                CallId -> {'reply', [{'cf_module_pid', get_pid(PidRef)}
                                      ,{'cf_event_pids', Others}
                                     ]};
-                'undefined' -> {'reply', [{'cf_module_pid', Pid}
+                'undefined' -> {'reply', [{'cf_module_pid', get_pid(PidRef)}
                                           ,{'cf_event_pids', Others}
                                          ]};
                 _Else -> 'ignore'
             end;
         {_, CallId} ->
-            {'reply', [{'cf_module_pid', Pid}
+            {'reply', [{'cf_module_pid', get_pid(PidRef)}
                        ,{'cf_event_pids', Others}
                       ]};
         {_, _Else} when Others =:= [] ->
@@ -467,6 +500,10 @@ handle_event(JObj, #state{cf_module_pid=Pid
             lager:info("the others want to know about ~p", [_Evt]),
             {'reply', [{'cf_event_pids', Others}]}
     end.
+
+-spec get_pid({pid(), _}) -> pid().
+get_pid({Pid, _}) when is_pid(Pid) -> Pid;
+get_pid(_) -> 'undefined'.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -483,13 +520,25 @@ terminate({'shutdown', 'transfer'}, _) ->
     lager:info("callflow execution has been transfered");
 terminate({'shutdown', 'control_usurped'}, _) ->
     lager:info("the call has been usurped by an external process");
-terminate(_Reason, #state{call=Call}) ->
+terminate(_Reason, #state{call=Call
+                          ,cf_module_pid='undefined'
+                         }) ->
+    hangup_call(Call),
+    lager:info("callflow execution has been stopped: ~p", [_Reason]);
+terminate(_Reason, #state{call=Call
+                          ,cf_module_pid={Pid, _}
+                         }) ->
+    exit(Pid, 'kill'),
+    hangup_call(Call),
+    lager:info("callflow execution has been stopped: ~p", [_Reason]).
+
+-spec hangup_call(whapps_call:call()) -> 'ok'.
+hangup_call(Call) ->
     Cmd = [{<<"Event-Name">>, <<"command">>}
            ,{<<"Event-Category">>, <<"call">>}
            ,{<<"Application-Name">>, <<"hangup">>}
           ],
-    send_command(Cmd, whapps_call:control_queue_direct(Call), whapps_call:call_id_direct(Call)),
-    lager:info("callflow execution has been stopped: ~p", [_Reason]).
+    send_command(Cmd, whapps_call:control_queue_direct(Call), whapps_call:call_id_direct(Call)).
 
 %%--------------------------------------------------------------------
 %% @private
@@ -514,21 +563,30 @@ code_change(_OldVsn, State, _Extra) ->
 %% @end
 %%--------------------------------------------------------------------
 -spec launch_cf_module(state()) -> state().
-launch_cf_module(#state{call=Call, flow=Flow}=State) ->
+launch_cf_module(#state{call=Call
+                        ,flow=Flow
+                       }=State) ->
     Module = <<"cf_", (wh_json:get_value(<<"module">>, Flow))/binary>>,
     Data = wh_json:get_value(<<"data">>, Flow, wh_json:new()),
-    {Pid, Action} = maybe_start_cf_module(Module, Data, Call),
-    State#state{cf_module_pid=Pid
+    {PidRef, Action} = maybe_start_cf_module(Module, Data, Call),
+    link(get_pid(PidRef)),
+    State#state{cf_module_pid=PidRef
                 ,call=whapps_call:kvs_store('cf_last_action', Action, Call)
                }.
 
+maybe_stop_caring('undefined') -> 'ok';
+maybe_stop_caring({P, R}) ->
+    unlink(P),
+    erlang:demonitor(R, ['flush']),
+    lager:debug("stopped caring about ~p(~p)", [P, R]).
+
 -spec maybe_start_cf_module(ne_binary(), wh_proplist(), whapps_call:call()) ->
-                                         {pid() | 'undefined', atom()}.
+                                   {{pid(), reference()} | 'undefined', atom()}.
 maybe_start_cf_module(ModuleBin, Data, Call) ->
     CFModule = wh_util:to_atom(ModuleBin, 'true'),
     try CFModule:module_info('imports') of
         _ ->
-            lager:info("moving to action ~s", [CFModule]),
+            lager:info("moving to action '~s'", [CFModule]),
             spawn_cf_module(CFModule, Data, Call)
     catch
         'error':'undef' ->
@@ -549,10 +607,11 @@ cf_module_not_found(Call) ->
 %% point 'handle' having set the callid on the new process first
 %% @end
 %%--------------------------------------------------------------------
--spec spawn_cf_module(CFModule, list(), whapps_call:call()) -> {pid(), CFModule}.
+-spec spawn_cf_module(CFModule, list(), whapps_call:call()) ->
+                             {{pid(), reference()}, CFModule}.
 spawn_cf_module(CFModule, Data, Call) ->
     AMQPConsumer = wh_amqp_channel:consumer_pid(),
-    {spawn_link(
+    {spawn_monitor(
        fun() ->
                _ = wh_amqp_channel:consumer_pid(AMQPConsumer),
                put('callid', whapps_call:call_id_direct(Call)),

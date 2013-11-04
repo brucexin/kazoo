@@ -1,3 +1,4 @@
+
 %%%-------------------------------------------------------------------
 %%% @copyright (C) 2011-2013, 2600Hz INC
 %%% @doc
@@ -152,14 +153,16 @@ caller_controls_xml(CCs) when is_list(CCs) ->
     caller_controls_el(GroupsEls);
 caller_controls_xml(CCs) -> caller_controls_xml(wh_json:to_proplist(CCs)).
 
-group_xml(Name, Controls) ->
+group_xml(Name, Controls) when is_list(Controls) ->
     ControlEls = [control_el(wh_json:get_value(<<"action">>, Control)
                              ,wh_json:get_value(<<"digits">>, Control)
                              ,wh_json:get_value(<<"data">>, Control)
                             )
                   || Control <- Controls
                  ],
-    group_el(Name, ControlEls).
+    group_el(Name, ControlEls);
+group_xml(Name, Controls) ->
+    group_xml(Name, wh_json:to_proplist(Controls)).
 
 chat_permissions_xml(CPs) when is_list(CPs) ->
     ProfileEls = [profile_xml(Name, Users) || {Name, Users} <- CPs],
@@ -223,12 +226,11 @@ route_resp_xml(<<"bridge">>, Routes, JObj) ->
     TransferEl = route_resp_transfer_ringback(JObj),
     %% format the Route based on protocol
     {_Idx, Extensions} = lists:foldr(fun route_resp_fold/2, {1, []}, Routes),
-
     FailRespondEl = action_el(<<"respond">>, <<"${bridge_hangup_cause}">>),
     FailConditionEl = condition_el(FailRespondEl),
     FailExtEl = extension_el(<<"failed_bridge">>, <<"false">>, [FailConditionEl]),
-
-    ContextEl = context_el(?WHISTLE_CONTEXT, [LogEl, RingbackEl, TransferEl] ++ Extensions ++ [FailExtEl]),
+    Context = wh_json:get_value(<<"Context">>, JObj, ?WHISTLE_CONTEXT),
+    ContextEl = context_el(Context, [LogEl, RingbackEl, TransferEl] ++ Extensions ++ [FailExtEl]),
     SectionEl = section_el(<<"dialplan">>, <<"Route Bridge Response">>, ContextEl),
     {'ok', xmerl:export([SectionEl], 'fs_xml')};
 
@@ -330,7 +332,6 @@ get_channel_vars({<<"SIP-Headers">>, SIPJObj}, Vars) ->
     lists:foldl(fun({K,V}, Vars0) ->
                         [ list_to_binary(["sip_h_", K, "=", V]) | Vars0]
                 end, Vars, SIPHeaders);
-
 get_channel_vars({<<"To-User">>, Username}, Vars) ->
     [list_to_binary([?CHANNEL_VAR_PREFIX, "Username"
                      ,"='", wh_util:to_list(Username), "'"])
@@ -339,6 +340,10 @@ get_channel_vars({<<"To-User">>, Username}, Vars) ->
 get_channel_vars({<<"To-Realm">>, Realm}, Vars) ->
     [list_to_binary([?CHANNEL_VAR_PREFIX, "Realm"
                      ,"='", wh_util:to_list(Realm), "'"])
+     | Vars
+    ];
+get_channel_vars({<<"To-URI">>, ToURI}, Vars) ->
+    [<<"sip_invite_to_uri=<", ToURI/binary, ">">>
      | Vars
     ];
 
@@ -374,7 +379,10 @@ get_channel_vars({<<"Codecs">>, Cs}, Vars) ->
 get_channel_vars({<<"Timeout">>, V}, Vars) ->
     case wh_util:to_integer(V) of
         TO when TO > 0 ->
-            [ <<"call_timeout=", (wh_util:to_binary(TO))/binary>> | Vars];
+            [<<"call_timeout=", (wh_util:to_binary(TO))/binary>>
+             ,<<"originate_timeout=", (wh_util:to_binary(TO))/binary>>
+             | Vars
+            ];
         _Else -> Vars
     end;
 
@@ -383,6 +391,9 @@ get_channel_vars({<<"Forward-IP">>, <<"sip:", _/binary>>=V}, Vars) ->
 
 get_channel_vars({<<"Forward-IP">>, V}, Vars) ->
     get_channel_vars({<<"Forward-IP">>, <<"sip:", V/binary>>}, Vars);
+
+get_channel_vars({<<"Enable-T38-Gateway">>, Direction}, Vars) ->
+    [<<"execute_on_answer='t38_gateway ", Direction/binary, "'">> | Vars];
 
 get_channel_vars({AMQPHeader, V}, Vars) when not is_list(V) ->
     case lists:keyfind(AMQPHeader, 1, ?SPECIAL_CHANNEL_VARS) of

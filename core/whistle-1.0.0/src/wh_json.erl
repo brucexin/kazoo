@@ -27,7 +27,7 @@
 -export([get_json_value/2, get_json_value/3]).
 -export([is_true/2, is_true/3, is_false/2, is_false/3, is_empty/1]).
 
--export([filter/2, filter/3, map/2, foldl/3, find/2, find/3]).
+-export([filter/2, filter/3, map/2, foldl/3, find/2, find/3, foreach/2]).
 -export([get_ne_value/2, get_ne_value/3]).
 -export([get_value/2, get_value/3, get_values/1]).
 -export([get_keys/1, get_keys/2]).
@@ -36,6 +36,8 @@
 -export([merge_recursive/2]).
 
 -export([from_list/1, merge_jobjs/2]).
+
+-export([load_fixture_from_file/2]).
 
 -export([normalize_jobj/1
          ,normalize/1
@@ -272,6 +274,9 @@ filter(Pred, JObj, Key) -> filter(Pred, JObj, [Key]).
 
 -spec map(fun((json_string(), json_term()) -> {json_string(), json_term()}), object()) -> object().
 map(F, ?JSON_WRAPPER(Prop)) -> from_list([ F(K, V) || {K,V} <- Prop]).
+
+-spec foreach(fun(({json_key(), json_term()}) -> any()), object()) -> 'ok'.
+foreach(F, ?JSON_WRAPPER(Prop)) when is_function(F, 1) -> lists:foreach(F, Prop).
 
 -spec foldl(fun((key(), json_term(), any()) -> any()), any(), object()) -> any().
 foldl(F, Acc0, ?JSON_WRAPPER([])) when is_function(F, 3) -> Acc0;
@@ -629,6 +634,32 @@ replace_in_list(N, V1, [V | Vs], Acc) ->
 
 %%--------------------------------------------------------------------
 %% @doc
+%% Read a json fixture file from the filesystem into memory
+%%
+%% @end
+%%--------------------------------------------------------------------
+-spec load_fixture_from_file(atom(), nonempty_string() | ne_binary()) ->
+                                {'ok', wh_json:object()} |
+                                {'error', atom()}.
+load_fixture_from_file(App, File) ->
+    Path = list_to_binary([code:priv_dir(App), "/couchdb/", wh_util:to_list(File)]),
+    lager:debug("read fixture from filesystem whapp ~s from CouchDB JSON file: ~s", [App, Path]),
+    try
+        {'ok', Bin} = file:read_file(Path),
+        decode(Bin)
+    catch
+        _Type:{'badmatch',{'error',Reason}} ->
+            lager:debug("badmatch error: ~p", [Reason]),
+            {'error', Reason};
+        _Type:Reason ->
+            lager:debug("exception: ~p", [Reason]),
+            {'error', Reason}
+    end.
+
+
+
+%%--------------------------------------------------------------------
+%% @doc
 %% Normalize a JSON object for storage as a Document
 %% All dashes are replaced by underscores, all upper case character are
 %% converted to lower case
@@ -639,7 +670,11 @@ replace_in_list(N, V1, [V | Vs], Acc) ->
 normalize_jobj(JObj) -> normalize(JObj).
 
 -spec normalize(object()) -> object().
-normalize(JObj) -> map(fun(K, V) -> {normalize_key(K), normalize_value(V)} end, JObj).
+normalize(JObj) -> foldl(fun normalize_foldl/3, new(), JObj).
+
+-spec normalize_foldl(key(), json_term(), object()) -> object().
+normalize_foldl(_K, 'undefined', JObj) -> JObj;
+normalize_foldl(K, V, JObj) -> set_value(normalize_key(K), normalize_value(V), JObj).
 
 -spec normalize_value(json_term()) -> json_term().
 normalize_value([_|_]=As) -> [normalize_value(A) || A <- As];

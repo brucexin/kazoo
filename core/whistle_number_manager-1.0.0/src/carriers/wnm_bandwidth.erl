@@ -9,10 +9,11 @@
 %%%-------------------------------------------------------------------
 -module(wnm_bandwidth).
 
--export([find_numbers/2]).
+-export([find_numbers/3]).
 -export([acquire_number/1]).
 -export([disconnect_number/1]).
 -export([get_number_data/1]).
+-export([is_number_billable/1]).
 
 -include("../wnm.hrl").
 
@@ -38,7 +39,7 @@
 %% in a rate center
 %% @end
 %%--------------------------------------------------------------------
--spec get_number_data/1 :: (ne_binary()) -> wh_json:json_object().
+-spec get_number_data/1 :: (ne_binary()) -> wh_json:object().
 get_number_data(<<"+", Rest/binary>>) ->
     get_number_data(Rest);
 get_number_data(<<"1", Rest/binary>>) ->
@@ -61,13 +62,13 @@ get_number_data(Number) ->
 %% in a rate center
 %% @end
 %%--------------------------------------------------------------------
--spec find_numbers/2 :: (ne_binary(), pos_integer()) -> {'ok', wh_json:json_object()} |
+-spec find_numbers/3 :: (ne_binary(), pos_integer(), wh_proplist()) -> {'ok', wh_json:object()} |
                                                         {'error', term()}.
-find_numbers(<<"+", Rest/binary>>, Quanity) ->
-    find_numbers(Rest, Quanity);
-find_numbers(<<"1", Rest/binary>>, Quanity) ->
-    find_numbers(Rest, Quanity);
-find_numbers(<<NPA:3/binary>>, Quanity) ->
+find_numbers(<<"+", Rest/binary>>, Quanity, Opts) ->
+    find_numbers(Rest, Quanity, Opts);
+find_numbers(<<"1", Rest/binary>>, Quanity, Opts) ->
+    find_numbers(Rest, Quanity, Opts);
+find_numbers(<<NPA:3/binary>>, Quanity, _) ->
     Props = [{'areaCode', [wh_util:to_list(NPA)]}
              ,{'maxQuantity', [wh_util:to_list(Quanity)]}], 
     case make_numbers_request('areaCodeNumberSearch', Props) of
@@ -82,7 +83,7 @@ find_numbers(<<NPA:3/binary>>, Quanity) ->
                     || Number <- xmerl_xpath:string(TelephoneNumbers, Xml)],
             {ok, wh_json:from_list(Resp)}
     end;
-find_numbers(Search, Quanity) ->
+find_numbers(Search, Quanity, _) ->
     NpaNxx = binary:part(Search, 0, (case size(Search) of L when L < 6 -> L; _ -> 6 end)),
     Props = [{'npaNxx', [wh_util:to_list(NpaNxx)]}
              ,{'maxQuantity', [wh_util:to_list(Quanity)]}], 
@@ -98,6 +99,9 @@ find_numbers(Search, Quanity) ->
                     || Number <- xmerl_xpath:string(TelephoneNumbers, Xml)],
             {ok, wh_json:from_list(Resp)}
     end.
+
+-spec is_number_billable/1 :: (wnm_number()) -> 'true' | 'false'.
+is_number_billable(_Number) -> 'true'.
 
 %%--------------------------------------------------------------------
 %% @public
@@ -240,7 +244,7 @@ make_numbers_request(Verb, Props) ->
 %% Convert a number order response to json
 %% @end
 %%--------------------------------------------------------------------
--spec number_order_response_to_json/1 :: (term()) -> wh_json:json_object().
+-spec number_order_response_to_json/1 :: (term()) -> wh_json:object().
 number_order_response_to_json([]) ->
     wh_json:new();
 number_order_response_to_json([Xml]) ->
@@ -264,7 +268,7 @@ number_order_response_to_json(Xml) ->
 %% Convert a number search response XML entity to json
 %% @end
 %%--------------------------------------------------------------------
--spec number_search_response_to_json/1 :: (term()) -> wh_json:json_object().
+-spec number_search_response_to_json/1 :: (term()) -> wh_json:object().
 number_search_response_to_json([]) ->
     wh_json:new();
 number_search_response_to_json([Xml]) ->
@@ -286,7 +290,7 @@ number_search_response_to_json(Xml) ->
 %% Convert a rate center XML entity to json
 %% @end
 %%--------------------------------------------------------------------
--spec rate_center_to_json/1 :: (list()) -> wh_json:json_object().
+-spec rate_center_to_json/1 :: (list()) -> wh_json:object().
 rate_center_to_json([]) ->
     wh_json:new();
 rate_center_to_json([Xml]) ->

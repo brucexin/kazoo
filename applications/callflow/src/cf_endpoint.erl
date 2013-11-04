@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%%% @copyright (C) 2011-2012, VoIP INC
+%%% @copyright (C) 2011-2013, 2600Hz INC
 %%% @doc
 %%%
 %%% @end
@@ -167,6 +167,19 @@ merge_attributes([<<"call_forward">> = Key|Keys], Account, Endpoint, Owner) ->
             Merged2 = wh_json:merge_recursive(Merged1, OwnerAttr),
             merge_attributes(Keys, Account, wh_json:set_value(Key, Merged2, Endpoint), Owner)
     end;
+merge_attributes([<<"caller_id">> = Key|Keys], Account, Endpoint, Owner) ->
+    AccountAttr = wh_json:get_ne_value(Key, Account, wh_json:new()),
+    EndpointAttr = wh_json:get_ne_value(Key, Endpoint, wh_json:new()),
+    OwnerAttr = wh_json:get_ne_value(Key, Owner, wh_json:new()),
+    Merged1 = wh_json:merge_recursive(AccountAttr, EndpointAttr),
+    Merged2 = wh_json:merge_recursive(Merged1, OwnerAttr),
+    case wh_json:get_ne_value([<<"emergency">>, <<"number">>], EndpointAttr) of
+        'undefined' ->
+            merge_attributes(Keys, Account, wh_json:set_value(Key, Merged2, Endpoint), Owner);
+        Number ->
+            Merged3 = wh_json:set_value([<<"emergency">>, <<"number">>], Number, Merged2),
+            merge_attributes(Keys, Account, wh_json:set_value(Key, Merged3, Endpoint), Owner)
+    end;
 merge_attributes([Key|Keys], Account, Endpoint, Owner) ->
     AccountAttr = wh_json:get_ne_value(Key, Account, wh_json:new()),
     EndpointAttr = wh_json:get_ne_value(Key, Endpoint, wh_json:new()),
@@ -322,7 +335,9 @@ flush(Db, Id) ->
          | wh_api:default_headers(<<"configuration">>, <<"doc_edited">>
                                       ,?APP_NAME, ?APP_VERSION)
         ],
-    Fun = fun(P) -> wapi_conf:publish_doc_update(<<"edited">>, Db, <<"device">>, Id, P) end,
+    Fun = fun(P) ->
+                  wapi_conf:publish_doc_update('edited', Db, <<"device">>, Id, P)
+          end,
     whapps_util:amqp_pool_send(Props, Fun).
 
 %%--------------------------------------------------------------------
@@ -475,7 +490,9 @@ create_endpoints(Endpoint, Properties, Call) ->
                                        wh_json:objects().
 try_create_endpoint(Routine, Endpoints, Endpoint, Properties, Call) when is_function(Routine, 3) ->
     try Routine(Endpoint, Properties, Call) of
-        {'error', _} -> Endpoints;
+        {'error', _R} -> 
+            lager:warning("failed to create endpoint: ~p", [_R]),
+            Endpoints;
         JObj -> [JObj|Endpoints]
     catch
         _E:_R ->
@@ -515,13 +532,15 @@ maybe_create_endpoint(Endpoint, Properties, Call) ->
     end.
 
 -spec maybe_create_endpoint(ne_binary(), wh_json:object(), wh_json:object(), whapps_call:call()) ->
-                                   wh_json:object().
+                                   wh_json:object() | {'error', ne_binary()}.
 maybe_create_endpoint(<<"sip">>, Endpoint, Properties, Call) ->
     lager:info("building a SIP endpoint"),
     create_sip_endpoint(Endpoint, Properties, Call);
 maybe_create_endpoint(<<"skype">>, Endpoint, Properties, Call) ->
     lager:info("building a Skype endpoint"),
-    create_skype_endpoint(Endpoint, Properties, Call).
+    create_skype_endpoint(Endpoint, Properties, Call);
+maybe_create_endpoint(UnknownType, _, _, _) ->
+    {'error', <<"unknown endpoint type ", (wh_util:to_binary(UnknownType))/binary>>}.
 
 -spec get_endpoint_type(wh_json:object()) -> ne_binary().
 get_endpoint_type(Endpoint) ->
@@ -538,7 +557,11 @@ guess_endpoint_type(Endpoint, [Type|Types]) ->
         'undefined' -> guess_endpoint_type(Endpoint, Types);
         _ -> Type
     end;
-guess_endpoint_type(_Endpoint, []) -> <<"sip">>.
+guess_endpoint_type(Endpoint, []) -> 
+    case wh_json:get_ne_value(<<"sip">>, Endpoint) of
+        'undefined' -> <<"unknown">>;
+        _Else -> <<"sip">>
+    end.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -584,10 +607,12 @@ create_sip_endpoint(Endpoint, Properties, Call) ->
          ,{<<"Route">>, wh_json:get_value(<<"route">>, SIPJObj)}
          ,{<<"Proxy-IP">>, wh_json:get_value(<<"proxy">>, SIPJObj)}
          ,{<<"Forward-IP">>, wh_json:get_value(<<"forward">>, SIPJObj)}
+         ,{<<"Callee-ID-Name">>, CalleeName}
          ,{<<"Callee-ID-Number">>, CalleeNum}
+         ,{<<"Outbound-Callee-ID-Name">>, CalleeName}
+         ,{<<"Outbound-Callee-ID-Number">>, CalleeNum}
          ,{<<"Outbound-Caller-ID-Number">>, OutgoingCIDNum}
          ,{<<"Outbound-Caller-ID-Name">>, IntCIDName}
-         ,{<<"Callee-ID-Name">>, CalleeName}
          ,{<<"Ignore-Early-Media">>, get_ignore_early_media(Endpoint)}
          ,{<<"Bypass-Media">>, get_bypass_media(Endpoint)}
          ,{<<"Endpoint-Progress-Timeout">>, get_progress_timeout(Endpoint)}
@@ -601,6 +626,7 @@ create_sip_endpoint(Endpoint, Properties, Call) ->
          ,{<<"Custom-Channel-Vars">>, generate_ccvs(Endpoint, Call)}
          ,{<<"Flags">>, get_outbound_flags(Endpoint)}
          ,{<<"Force-Fax">>, get_force_fax(Endpoint)}
+         ,{<<"Ignore-Completed-Elsewhere">>, wh_json:is_true(<<"ignore_complete_elsewhere">>, Endpoint)}
         ],
     wh_json:from_list(props:filter_undefined(Prop)).
 
@@ -761,6 +787,20 @@ generate_ccvs(Endpoint, Call, CallFwd) ->
                         case wh_json:get_value([<<"media">>, <<"fax_option">>], Endpoint) of
                             <<"auto">> -> wh_json:set_value(<<"Fax-Enabled">>, <<"true">>, J);
                             _Else -> J
+                        end
+                end
+               ,fun(J) -> 
+                        case wh_json:is_true([<<"media">>, <<"secure_rtp">>], Endpoint) of
+                            'false' -> J;
+                            'true' ->
+                                wh_json:set_value(<<"Secure-RTP">>, <<"true">>, J)
+                        end
+                end
+               ,fun(J) -> 
+                        case wh_json:is_true([<<"sip">>, <<"ignore_completed_elsewhere">>], Endpoint) of
+                            'false' -> J;
+                            'true' ->
+                                wh_json:set_value(<<"Ignore-Completed-Elsewhere">>, <<"true">>, J)
                         end
                 end
               ],

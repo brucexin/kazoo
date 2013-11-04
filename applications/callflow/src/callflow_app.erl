@@ -14,20 +14,19 @@
 
 -export([start/2, stop/1]).
 
+%% ===================================================================
+%% Application callbacks
+%% ===================================================================
 %%--------------------------------------------------------------------
 %% @public
 %% @doc
 %% Implement the application start behaviour
 %% @end
 %%--------------------------------------------------------------------
--spec start(term(), term()) -> {'ok', pid()} |
-                               {'error', startlink_err()}.
-start(_, _) ->
-    case callflow:start_link() of
-        {'ok', P} -> {'ok', P};
-        {'error', {'already_started', P} } -> {'ok', P};
-        {'error', _}=E -> E
-    end.
+-spec start(term(), term()) ->
+                   {'ok', pid()} |
+                   {'error', startlink_err()}.
+start(_, _) -> callflow:start_link().
 
 %%--------------------------------------------------------------------
 %% @public

@@ -17,7 +17,7 @@
          ,proc_id/0, proc_id/1, proc_id/2
          ,queue_presence_update/2
          ,agent_presence_update/2
-         ,presence_update/3
+         ,presence_update/3, presence_update/4
          ,send_cdr/2
         ]).
 
@@ -39,13 +39,16 @@ agent_presence_update(AcctId, AgentId) ->
     end.
 
 -spec presence_update(ne_binary(), ne_binary(), ne_binary()) -> 'ok'.
+-spec presence_update(ne_binary(), ne_binary(), ne_binary(), api_binary()) -> 'ok'.
 presence_update(AcctId, PresenceId, State) ->
+    presence_update(AcctId, PresenceId, State, 'undefined').
+presence_update(AcctId, PresenceId, State, CallId) ->
     AcctDb = wh_util:format_account_id(AcctId, 'encoded'),
     {'ok', AcctDoc} = couch_mgr:open_cache_doc(AcctDb, AcctId),
     To = <<PresenceId/binary, "@", (wh_json:get_value(<<"realm">>, AcctDoc))/binary>>,
 
     lager:debug("sending presence update '~s' to '~s'", [State, To]),
-    whapps_call_command:presence(State, To).
+    whapps_call_command:presence(State, To, CallId).
 
 -spec send_cdr(ne_binary(), wh_json:object()) -> 'ok'.
 send_cdr(Url, JObj) ->
@@ -79,7 +82,7 @@ agent_devices(AcctDb, AgentId) ->
     end.
 
 -spec get_endpoints(whapps_call:call(), ne_binary() | couch_mgr:get_results_return()) ->
-                                 wh_json:objects().
+                           wh_json:objects().
 get_endpoints(Call, ?NE_BINARY = AgentId) ->
     cf_user:get_endpoints(AgentId, [], Call).
 

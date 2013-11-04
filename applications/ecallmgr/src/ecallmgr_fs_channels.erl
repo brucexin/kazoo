@@ -29,8 +29,11 @@
         ]).
 -export([account_summary/1]).
 -export([match_presence/1]).
+
 -export([handle_query_auth_id/2]).
 -export([handle_query_user_channels/2]).
+-export([handle_channel_status/2]).
+
 -export([init/1
          ,handle_call/3
          ,handle_cast/2
@@ -47,6 +50,9 @@
                      }
                      ,{{?MODULE, 'handle_query_user_channels'}
                        ,[{<<"call_event">>, <<"query_user_channels_req">>}]
+                      }
+                     ,{{?MODULE, 'handle_channel_status'}
+                       ,[{<<"call_event">>, <<"channel_status_req">>}]
                       }
                     ]).
 -define(BINDINGS, [{'call', [{'restrict_to', ['status_req']}]}]).
@@ -106,7 +112,7 @@ summary(Node) ->
                   ,[{'=:=', '$1', {'const', Node}}]
                   ,['$_']
                  }],
-    print_summary(ets:select(?CHANNELS_TBL, MatchSpec, 1)).    
+    print_summary(ets:select(?CHANNELS_TBL, MatchSpec, 1)).
 
 -spec details() -> 'ok'.
 details() ->
@@ -114,13 +120,13 @@ details() ->
                   ,[]
                   ,['$_']
                  }],
-    print_details(ets:select(?CHANNELS_TBL, MatchSpec, 1)).    
+    print_details(ets:select(?CHANNELS_TBL, MatchSpec, 1)).
 
 -spec details(text()) -> 'ok'.
 details(UUID) when not is_binary(UUID) ->
     details(wh_util:to_binary(UUID));
 details(UUID) ->
-    MatchSpec = [{#channel{uuid=UUID, _ = '_'}
+    MatchSpec = [{#channel{uuid='$1', _ = '_'}
                   ,[{'=:=', '$1', {'const', UUID}}]
                   ,['$_']
                  }],
@@ -195,21 +201,70 @@ handle_query_auth_id(JObj, _Props) ->
     ServerId = wh_json:get_value(<<"Server-ID">>, JObj),
     wapi_call:publish_query_auth_id_resp(ServerId, Resp).
 
+-spec handle_query_user_channels(wh_json:object(), wh_proplist()) -> 'ok'.
 handle_query_user_channels(JObj, _Props) ->
     'true' = wapi_call:query_user_channels_req_v(JObj),
-    Username = wh_json:get_value(<<"Username">>, JObj),
+
     Realm = wh_json:get_value(<<"Realm">>, JObj),
 
+    case wh_json:get_value(<<"Username">>, JObj) of
+        'undefined' -> handle_query_users_channels(JObj, Realm);
+        Username -> handle_query_user_channels(JObj, Username, Realm)
+    end.
+
+-spec handle_query_users_channels(wh_json:object(), ne_binary()) -> 'ok'.
+handle_query_users_channels(JObj, Realm) ->
+    case find_users_channels(wh_json:get_value(<<"Usernames">>, JObj), Realm) of
+        {'ok', Cs} -> send_user_query_resp(JObj, Cs);
+        {'error', _E} -> lager:debug("failed to lookup channels in realm ~s", [Realm])
+    end.
+
+-spec handle_query_user_channels(wh_json:object(), ne_binary(), ne_binary()) -> 'ok'.
+handle_query_user_channels(JObj, Username, Realm) ->
     case find_by_user_realm(Username, Realm) of
         {'error', _E} -> lager:debug("failed to lookup channels for ~s:~s", [Username, Realm]);
-        {'ok', Cs} ->
-            Resp = [{<<"Channels">>, Cs}
+        {'ok', Cs} -> send_user_query_resp(JObj, Cs)
+    end.
+
+-spec send_user_query_resp(wh_json:object(), wh_json:objects()) -> 'ok'.
+send_user_query_resp(JObj, Cs) ->
+    Resp = [{<<"Channels">>, Cs}
+            ,{<<"Msg-ID">>, wh_json:get_value(<<"Msg-ID">>, JObj)}
+            | wh_api:default_headers(?APP_NAME, ?APP_VERSION)
+           ],
+    ServerId = wh_json:get_value(<<"Server-ID">>, JObj),
+    lager:debug("sending back channel data to ~s", [ServerId]),
+    wapi_call:publish_query_user_channels_resp(ServerId, Resp).
+
+-spec handle_channel_status(wh_json:object(), wh_proplist()) -> 'ok'.
+handle_channel_status(JObj, _Props) ->
+    'true' = wapi_call:channel_status_req_v(JObj),
+    _ = wh_util:put_callid(JObj),
+    CallId = wh_json:get_value(<<"Call-ID">>, JObj),
+    lager:debug("channel status request received"),
+    case ecallmgr_fs_channel:fetch(CallId) of
+        {'error', 'not_found'} ->
+            lager:debug("no node found with channel ~s", [CallId]),
+            Resp = [{<<"Call-ID">>, CallId}
+                    ,{<<"Status">>, <<"terminated">>}
+                    ,{<<"Error-Msg">>, <<"no node found with channel">>}
                     ,{<<"Msg-ID">>, wh_json:get_value(<<"Msg-ID">>, JObj)}
                     | wh_api:default_headers(?APP_NAME, ?APP_VERSION)
                    ],
-            ServerId = wh_json:get_value(<<"Server-ID">>, JObj),
-            lager:debug("sending back channel data for ~s@~s to ~s", [Username, Realm, ServerId]),
-            wapi_call:publish_query_user_channels_resp(ServerId, Resp)
+            wapi_call:publish_channel_status_resp(wh_json:get_value(<<"Server-ID">>, JObj), Resp);
+        {'ok', Channel} ->
+            Node = wh_json:get_binary_value(<<"node">>, Channel),
+            [_, Hostname] = binary:split(Node, <<"@">>),
+            lager:debug("channel is on ~s", [Hostname]),
+            Resp = [{<<"Call-ID">>, CallId}
+                    ,{<<"Status">>, <<"active">>}
+                    ,{<<"Switch-Hostname">>, Hostname}
+                    ,{<<"Switch-Nodename">>, wh_util:to_binary(Node)}
+                    ,{<<"Switch-URL">>, ecallmgr_fs_nodes:sip_url(Node)}
+                    ,{<<"Msg-ID">>, wh_json:get_value(<<"Msg-ID">>, JObj)}
+                    | wh_api:default_headers(?APP_NAME, ?APP_VERSION)
+                   ],
+            wapi_call:publish_channel_status_resp(wh_json:get_value(<<"Server-ID">>, JObj), Resp)
     end.
 
 %%%===================================================================
@@ -278,6 +333,7 @@ handle_cast({'destroy_channel', UUID, Node}, State) ->
     N = ets:select_delete(?CHANNELS_TBL, MatchSpec),
     lager:debug("removed ~p channel(s) with id ~s on ~s", [N, UUID, Node]),
     {'noreply', State, 'hibernate'};
+
 handle_cast({'sync_channels', Node, Channels}, State) ->
     lager:debug("ensuring channel cache is in sync with ~s", [Node]),
     MatchSpec = [{#channel{uuid = '$1', node = '$2', _ = '_'}
@@ -313,6 +369,7 @@ handle_cast({'flush_node', Node}, State) ->
     ets:select_delete(?CHANNELS_TBL, MatchSpec),
     {'noreply', State};
 handle_cast(_Req, State) ->
+    lager:debug("unhandled cast: ~p", [_Req]),
     {'noreply', State}.
 
 %%--------------------------------------------------------------------
@@ -503,6 +560,28 @@ find_by_user_realm(Username, Realm) ->
                    ]}
     end.
 
+-spec find_users_channels(ne_binaries(), ne_binary()) ->
+                                 {'ok', wh_json:objects()} |
+                                 {'error', 'not_found'}.
+find_users_channels(Usernames, Realm) ->
+    ETSUsernames = build_matchspec_ors(Usernames),
+    MatchSpec = [{#channel{username='$1', realm='$2', _ = '_'}
+                  ,[ETSUsernames
+                    ,{'=:=', '$2', {'const', Realm}}
+                   ]
+                  ,['$_']
+                 }],
+    case ets:select(?CHANNELS_TBL, MatchSpec) of
+        [] -> {'error', 'not_found'};
+        Channels ->
+            {'ok', [ecallmgr_fs_channel:to_json(Channel)
+                    || Channel <- Channels
+                   ]}
+    end.
+
+build_matchspec_ors(L) ->
+    lists:foldl(fun(El, Acc) -> {'or', {'=:=', '$1', El}, Acc} end, 'false', L).
+
 print_summary('$end_of_table') ->
     io:format("No channels found!~n", []);
 print_summary(Match) ->
@@ -514,10 +593,12 @@ print_summary(Match) ->
 print_summary('$end_of_table', Count) ->
     io:format("+----------------------------------------------------+------------------------------------------+-----------+-----------------+----------------------------------+~n"),
     io:format("Found ~p channels~n", [Count]);
-print_summary({[#channel{uuid=UUID, node=Node
+print_summary({[#channel{uuid=UUID
+                         ,node=Node
                          ,direction=Direction
                          ,destination=Destination
-                         ,account_id=AccountId}]
+                         ,account_id=AccountId
+                        }]
                ,Continuation}
               ,Count) ->
     io:format("| ~-50s | ~-40s | ~-9s | ~-15s | ~-32s |~n"
@@ -530,8 +611,7 @@ print_details(Match) ->
     print_details(Match, 0).
 
 print_details('$end_of_table', Count) ->
-    io:format("~n"),
-    io:format("Found ~p channels~n", [Count]);
+    io:format("~nFound ~p channels~n", [Count]);
 print_details({[#channel{}=Channel]
                ,Continuation}
               ,Count) ->
@@ -540,6 +620,9 @@ print_details({[#channel{}=Channel]
          || {K, V} <- ecallmgr_fs_channel:to_props(Channel)
         ],
     print_details(ets:select(Continuation), Count + 1).
+
+-spec print_authz_summary(ne_binaries()) -> 'ok'.
+-spec print_authz_summary(ne_binaries(), non_neg_integer()) -> 'ok'.
 
 print_authz_summary([]) ->
     io:format("No accounts found!~n");

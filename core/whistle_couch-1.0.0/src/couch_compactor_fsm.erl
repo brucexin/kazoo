@@ -63,10 +63,10 @@
         ,whapps_config:get_integer(?CONFIG_CAT, <<"sleep_between_views">>, 2000)
        ).
 -define(MAX_COMPACTING_SHARDS
-        ,whapps_config:get_integer(?CONFIG_CAT, <<"max_compacting_shards">>, 10)
+        ,whapps_config:get_integer(?CONFIG_CAT, <<"max_compacting_shards">>, 2)
        ).
 -define(MAX_COMPACTING_VIEWS
-        ,whapps_config:get_integer(?CONFIG_CAT, <<"max_compacting_views">>, 5)
+        ,whapps_config:get_integer(?CONFIG_CAT, <<"max_compacting_views">>, 2)
        ).
 -define(MAX_WAIT_FOR_COMPACTION_PIDS
         ,case whapps_config:get(?CONFIG_CAT, <<"max_wait_for_compaction_pids">>, 360000) of
@@ -263,6 +263,7 @@ init([]) ->
 
 %%--------------------------------------------------------------------
 ready('compact', State) ->
+    lager:debug("start compaction on all nodes"),
     gen_fsm:send_event(self(), 'compact'),
     {'next_state', 'compact', State#state{nodes=get_nodes()
                                           ,conn='undefined'
@@ -272,6 +273,7 @@ ready('compact', State) ->
                                           ,current_job_heuristic=?HEUR_RATIO
                                          }};
 ready({'compact_node', N, Opts}, State) ->
+    lager:debug("start compaction on node w/ options"),
     gen_fsm:send_event(self(), 'compact'),
     {'next_state', 'compact', State#state{nodes=[{N, Opts}]
                                           ,conn='undefined'
@@ -282,6 +284,7 @@ ready({'compact_node', N, Opts}, State) ->
                                          }};
 ready({'compact_db', D}, State) ->
     [N|Ns] = get_nodes(D),
+    lager:debug("start compaction on node's db"),
     gen_fsm:send_event(self(), {'compact_db', N, D}),
     {'next_state', 'compact', State#state{nodes=Ns
                                           ,dbs=[D]
@@ -292,6 +295,7 @@ ready({'compact_db', D}, State) ->
                                           ,current_job_heuristic=?HEUR_NONE
                                          }};
 ready({'compact_db', N, D, Opts}, State) ->
+    lager:debug("start compaction on node's db"),
     gen_fsm:send_event(self(), {'compact_db', {N, Opts}, D}),
     {'next_state', 'compact', State#state{nodes=[]
                                           ,dbs=[]
@@ -305,20 +309,23 @@ ready('next_job', #state{queued_jobs=Jobs}=State) ->
     case queue:out(Jobs) of
         {'empty', _} ->
             maybe_start_auto_compaction_job(),
+            lager:debug("returning to 'ready'"),
             {'next_state', 'ready', State#state{current_job_pid='undefined'
                                                 ,current_job_ref='undefined'
                                                }};
         {{'value', {Job, P, Ref}}, Jobs1} ->
             maybe_send_update(P, Ref, 'job_starting'),
+            lager:debug("starting job ~p", [Job]),
             gen_fsm:send_event(self(), Job),
             lager:debug("starting queued job for ~p:~p: ~p", [P, Ref, Job]),
+            lager:debug("returning to 'ready'"),
             {'next_state', 'ready', State#state{queued_jobs=Jobs1
                                                 ,current_job_pid=P
                                                 ,current_job_ref=Ref
                                                }}
     end;
 ready(_Msg, State) ->
-    lager:debug("unhandled msg: ~p", [_Msg]),
+    lager:debug("unhandled msg in ready: ~p", [_Msg]),
     {'next_state', 'ready', State}.
 
 ready('status', _, #state{}=State) ->
@@ -329,16 +336,26 @@ ready('cancel_current_job', _, State) ->
 
 ready('cancel_all_jobs', _, #state{queued_jobs=Jobs}=State) ->
     _ = [ maybe_send_update(P, Ref, 'job_cancelled') || {_, P, Ref} <- queue:to_list(Jobs)],
-    {'reply', {'ok', 'jobs_cancelled'}, 'ready', State#state{queued_jobs=queue:new()
-                                                             ,next_compaction_msg='undefined'
-                                                             ,shards_pid_ref='undefined'
+    {'reply', {'ok', 'jobs_cancelled'}, 'ready', State#state{nodes=[]
+                                                             ,dbs=[]
                                                              ,wait_ref='undefined'
+                                                             ,shards_pid_ref='undefined'
+                                                             ,next_compaction_msg='undefined'
+                                                             ,current_node='undefined'
+                                                             ,current_db='undefined'
+                                                             ,conn='undefined'
+                                                             ,admin_conn='undefined'
+                                                             ,queued_jobs=queue:new()
+                                                             ,current_job_pid='undefined'
+                                                             ,current_job_ref='undefined'
+                                                             ,current_job_heuristic = ?HEUR_NONE
                                                             }};
 
 ready(Msg, {NewP, _}, #state{queued_jobs=Jobs}=State) ->
     case queue:out(Jobs) of
         {'empty', _} ->
             {Ref, Jobs1} = queue_job(Msg, NewP, Jobs),
+            lager:debug("next job please"),
             gen_fsm:send_event(self(), 'next_job'),
             {'reply', {'queued', Ref}, 'ready', State#state{queued_jobs=Jobs1}};
 
@@ -356,32 +373,33 @@ ready(Msg, {NewP, _}, #state{queued_jobs=Jobs}=State) ->
     end.
 
 -spec queue_job(req_job(), pid(), queue()) -> {reference(), queue()}.
-queue_job('req_compact', P, Jobs) ->
+queue_job('req_compact', Pid, Jobs) ->
     Ref = erlang:make_ref(),
-    {Ref, queue:in({'compact', P, Ref}, Jobs)};
-queue_job({'req_compact_node', Node, Opts}, P, Jobs) ->
+    {Ref, queue:in({'compact', Pid, Ref}, Jobs)};
+queue_job({'req_compact_node', Node, Opts}, Pid, Jobs) ->
     Ref = erlang:make_ref(),
-    {Ref, queue:in({{'compact_node', Node, Opts}, P, Ref}, Jobs)};
-queue_job({'req_compact_db', Db}, P, Jobs) ->
+    {Ref, queue:in({{'compact_node', Node, Opts}, Pid, Ref}, Jobs)};
+queue_job({'req_compact_db', Db}, Pid, Jobs) ->
     Ref = erlang:make_ref(),
-    {Ref, queue:in({{'compact_db', Db}, P, Ref}, Jobs)};
-queue_job({'req_compact_db', Node, Db, Opts}, P, Jobs) ->
+    {Ref, queue:in({{'compact_db', Db}, Pid, Ref}, Jobs)};
+queue_job({'req_compact_db', Node, Db, Opts}, Pid, Jobs) ->
     Ref = erlang:make_ref(),
-    {Ref, queue:in({{'compact_db', Node, Db, Opts}, P, Ref}, Jobs)}.
+    {Ref, queue:in({{'compact_db', Node, Db, Opts}, Pid, Ref}, Jobs)}.
 
 %%--------------------------------------------------------------------
 compact({'compact', N}, #state{conn='undefined'
                                ,admin_conn='undefined'
                                ,nodes=[]
-                               ,current_job_pid=P
+                               ,current_job_pid=Pid
                                ,current_job_ref=Ref
                               }=State) ->
     Cookie = wh_couch_connections:get_node_cookie(),
     try get_node_connections(N, Cookie) of
         {'error', _E} ->
-            lager:debug("failed to connect to node ~s: ~p", [N, _E]),
-            maybe_send_update(P, Ref, 'job_finished'),
+            lager:debug("failed to connect to node ~p: ~p", [N, _E]),
+            maybe_send_update(Pid, Ref, 'job_finished'),
             gen_fsm:send_event(self(), 'next_job'),
+            lager:debug("returning to 'ready'"),
             {'next_state', 'ready', State#state{conn='undefined'
                                                 ,admin_conn='undefined'
                                                 ,current_node='undefined'
@@ -390,6 +408,7 @@ compact({'compact', N}, #state{conn='undefined'
                                                 ,current_job_ref='undefined'
                                                }};
         {Conn, AdminConn} ->
+            lager:debug("got conns, let's compact"),
             gen_fsm:send_event(self(), {'compact', N}),
             {'next_state', 'compact', State#state{conn=Conn
                                                   ,admin_conn=AdminConn
@@ -398,8 +417,9 @@ compact({'compact', N}, #state{conn='undefined'
     catch
         _:{'error', {'conn_failed', {'error', 'etimedout'}}} ->
             lager:debug("failed to connect to node ~s: timed out", [N]),
-            maybe_send_update(P, Ref, 'job_finished'),
+            maybe_send_update(Pid, Ref, 'job_finished'),
             gen_fsm:send_event(self(), 'next_job'),
+            lager:debug("returning to 'ready'"),
             {'next_state', 'ready', State#state{conn='undefined'
                                                 ,admin_conn='undefined'
                                                 ,current_node='undefined'
@@ -420,6 +440,7 @@ compact({'compact', N}=Msg, #state{conn='undefined'
                                                   ,current_node='undefined'
                                                  }};
         {Conn, AdminConn} ->
+            lager:debug("got conns, let's compact"),
             gen_fsm:send_event(self(), Msg),
             {'next_state', 'compact', State#state{conn=Conn
                                                   ,admin_conn=AdminConn
@@ -437,15 +458,16 @@ compact({'compact', N}=Msg, #state{conn='undefined'
 compact({'compact_db', N, D}=Msg, #state{conn='undefined'
                                          ,admin_conn='undefined'
                                          ,nodes=[]
-                                         ,current_job_pid=P
+                                         ,current_job_pid=Pid
                                          ,current_job_ref=Ref
                                         }=State) ->
     Cookie = wh_couch_connections:get_node_cookie(),
     try get_node_connections(N, Cookie) of
         {'error', _} ->
             lager:debug("failed to connect to node ~s: timed out", [N]),
-            maybe_send_update(P, Ref, 'job_finished'),
+            maybe_send_update(Pid, Ref, 'job_finished'),
             gen_fsm:send_event(self(), 'next_job'),
+            lager:debug("returning to 'ready'"),
             {'next_state', 'ready', State#state{conn='undefined'
                                                 ,admin_conn='undefined'
                                                 ,current_node='undefined'
@@ -454,6 +476,7 @@ compact({'compact_db', N, D}=Msg, #state{conn='undefined'
                                                 ,current_job_ref='undefined'
                                                }};
         {Conn, AdminConn} ->
+            lager:debug("got conns, let's compact"),
             gen_fsm:send_event(self(), Msg),
             {'next_state', 'compact', State#state{conn=Conn
                                                   ,admin_conn=AdminConn
@@ -463,8 +486,9 @@ compact({'compact_db', N, D}=Msg, #state{conn='undefined'
     catch
         _:{'error', {'conn_failed', {'error', 'etimedout'}}} ->
             lager:debug("failed to connect to node ~s: timed out", [N]),
-            maybe_send_update(P, Ref, 'job_finished'),
+            maybe_send_update(Pid, Ref, 'job_finished'),
             gen_fsm:send_event(self(), 'next_job'),
+            lager:debug("returning to 'ready'"),
             {'next_state', 'ready', State#state{conn='undefined'
                                                 ,admin_conn='undefined'
                                                 ,current_node='undefined'
@@ -488,6 +512,7 @@ compact({'compact_db', N, D}=Msg, #state{conn='undefined'
                                                   ,current_db=D
                                                  }};
         {Conn, AdminConn} ->
+            lager:debug("got conns, let's compact"),
             gen_fsm:send_event(self(), Msg),
             {'next_state', 'compact', State#state{conn=Conn
                                                   ,admin_conn=AdminConn
@@ -505,12 +530,14 @@ compact({'compact_db', N, D}=Msg, #state{conn='undefined'
     end;
 
 compact('compact', #state{nodes=[]
-                          ,current_job_pid=P
+                          ,dbs=[]
+                          ,current_job_pid=Pid
                           ,current_job_ref=Ref
                          }=State) ->
-    lager:debug("no nodes to compact"),
-    maybe_send_update(P, Ref, 'job_finished'),
+    lager:debug("no nodes to compact: ~p", [State]),
+    maybe_send_update(Pid, Ref, 'job_finished'),
     gen_fsm:send_event(self(), 'next_job'),
+    lager:debug("returning to 'ready'"),
     {'next_state', 'ready', State#state{conn='undefined'
                                         ,admin_conn='undefined'
                                         ,current_node='undefined'
@@ -529,7 +556,7 @@ compact('compact', #state{nodes=[N|Ns]}=State) ->
     {'next_state', 'compact', State#state{nodes=Ns}};
 
 compact({'compact', {N, _}}, #state{admin_conn=AdminConn}=State) ->
-    lager:debug("compacting node ~s", [N]),
+    lager:debug("compacting node ~s w/ options", [N]),
 
     {'ok', DBs} = node_dbs(AdminConn),
     [D|Ds] = shuffle(DBs),
@@ -550,6 +577,7 @@ compact({'compact', N}, #state{admin_conn=AdminConn}=State) ->
                                          }};
 
 compact({'compact', {N, _}, D}, State) ->
+    lager:debug("compacting node ~s db ~s", [N, D]),
     gen_fsm:send_event(self(), {'compact', N, D}),
     {'next_state', 'compact', State};
 compact({'compact', N, D}, #state{conn=Conn
@@ -557,6 +585,8 @@ compact({'compact', N, D}, #state{conn=Conn
                                   ,dbs=[]
                                   ,current_job_heuristic=Heur
                                  }=State) ->
+    lager:debug("checking if should compact ~s on ~s", [D, N]),
+
     Encoded = encode_db(D),
     case couch_util:db_exists(Conn, Encoded) andalso
         should_compact(Conn, Encoded, Heur)
@@ -580,6 +610,8 @@ compact({'compact', N, D}, #state{conn=Conn
                                   ,dbs=[Db|Dbs]
                                   ,current_job_heuristic=Heur
                                  }=State) ->
+    lager:debug("checking if should compact ~s on ~s", [D, N]),
+
     Encoded = encode_db(D),
     case couch_util:db_exists(Conn, Encoded) andalso
         should_compact(Conn, Encoded, Heur)
@@ -602,23 +634,26 @@ compact({'compact', N, D}, #state{conn=Conn
     end;
 
 compact({'compact_db', {N, _}, D}, State) ->
+    lager:debug("compacting node ~s on ~s", [N, D]),
     gen_fsm:send_event(self(), {'compact_db', N, D}),
     {'next_state', 'compact', State};
 compact({'compact_db', N, D}, #state{conn=Conn
                                      ,admin_conn=AdminConn
                                      ,nodes=[]
-                                     ,current_job_pid=P
+                                     ,current_job_pid=Pid
                                      ,current_job_ref=Ref
                                      ,current_job_heuristic=Heur
                                     }=State) ->
+    lager:debug("checking if should compact ~s on ~s", [D, N]),
     Encoded = encode_db(D),
     case couch_util:db_exists(Conn, Encoded) andalso
         should_compact(Conn, Encoded, Heur)
     of
         'false' ->
             lager:debug("db ~s not found on ~s OR heuristic not met", [D, N]),
-            maybe_send_update(P, Ref, 'job_finished'),
-            gen_fsm:send_event_after(?SLEEP_BETWEEN_POLL, 'next_job'),
+            maybe_send_update(Pid, Ref, 'job_finished'),
+            _R = gen_fsm:send_event_after(?SLEEP_BETWEEN_POLL, 'next_job'),
+            lager:debug("returning to 'ready': ~p", [_R]),
             {'next_state', 'ready', State#state{conn='undefined'
                                                 ,admin_conn='undefined'
                                                 ,current_node='undefined'
@@ -640,6 +675,8 @@ compact({'compact_db', N, D}, #state{conn=Conn
                                      ,nodes=[Node|Ns]
                                      ,current_job_heuristic=Heur
                                     }=State) ->
+    lager:debug("checking if should compact ~s on ~s", [D, N]),
+
     Encoded = encode_db(D),
     case couch_util:db_exists(Conn, Encoded) andalso
         should_compact(Conn, Encoded, Heur)
@@ -673,15 +710,16 @@ compact({'compact', N, D, [], _}, #state{dbs=[Db|Dbs]}=State) ->
 compact({'compact', N, D, Ss, DDs}, #state{admin_conn=AdminConn
                                            ,dbs=[]
                                           }=State) ->
-    lager:debug("compacting shards for ~s on ~s", [D, N]),
     try lists:split(?MAX_COMPACTING_SHARDS, Ss) of
         {Compact, Shards} ->
+            lager:debug("compacting ~b shards for ~s on ~s", [?MAX_COMPACTING_SHARDS, D, N]),
             ShardsPidRef = compact_shards(AdminConn, Compact, DDs),
             {'next_state', 'compact', State#state{shards_pid_ref=ShardsPidRef
                                                   ,next_compaction_msg={'compact', N, D, Shards, DDs}
                                                  }}
     catch
         'error':'badarg' ->
+            lager:debug("compacting last of the shards for ~s on ~s", [D, N]),
             ShardsPidRef = compact_shards(AdminConn, Ss, DDs),
             {'next_state', 'compact', State#state{shards_pid_ref=ShardsPidRef
                                                   ,next_compaction_msg='compact'
@@ -690,15 +728,16 @@ compact({'compact', N, D, Ss, DDs}, #state{admin_conn=AdminConn
 compact({'compact', N, D, Ss, DDs}, #state{admin_conn=AdminConn
                                            ,dbs=[Db|Dbs]
                                           }=State) ->
-    lager:debug("compacting shards for ~s on ~s", [D, N]),
     try lists:split(?MAX_COMPACTING_SHARDS, Ss) of
         {Compact, Shards} ->
+            lager:debug("compacting ~b shards for ~s on ~s", [?MAX_COMPACTING_SHARDS, D, N]),
             ShardsPidRef = compact_shards(AdminConn, Compact, DDs),
             {'next_state', 'compact', State#state{shards_pid_ref=ShardsPidRef
                                                   ,next_compaction_msg={'compact', N, D, Shards, DDs}
                                                  }}
     catch
         'error':'badarg' ->
+            lager:debug("compacting last of the shards for ~s on ~s", [D, N]),
             ShardsPidRef = compact_shards(AdminConn, Ss, DDs),
             {'next_state', 'compact', State#state{dbs=Dbs
                                                   ,shards_pid_ref=ShardsPidRef
@@ -706,19 +745,28 @@ compact({'compact', N, D, Ss, DDs}, #state{admin_conn=AdminConn
                                                  }}
     end;
 
+compact({'compact', N, _D, [], _}, #state{dbs=[Db|Dbs]}=State) ->
+    lager:debug("compacting node ~s with new db ~s", [N, Db]),
+    gen_fsm:send_event(self(), {'compact', N, Db}),
+    {'next_state', 'compact', State#state{dbs=Dbs
+                                          ,shards_pid_ref='undefined'
+                                          ,next_compaction_msg='undefined'
+                                         }};
 compact({'compact_db', N, D, [], _}, #state{nodes=[]
-                                            ,current_job_pid=P
+                                            ,current_job_pid=Pid
                                             ,current_job_ref=Ref
                                            }=State) ->
     lager:debug("no shards to compact for ~s on ~s", [D, N]),
-    maybe_send_update(P, Ref, 'job_finished'),
+    maybe_send_update(Pid, Ref, 'job_finished'),
     gen_fsm:send_event(self(), 'next_job'),
+    lager:debug("returning to 'ready'"),
     {'next_state', 'ready', State#state{conn='undefined'
                                         ,admin_conn='undefined'
                                         ,current_node='undefined'
                                         ,current_db='undefined'
                                         ,current_job_pid='undefined'
                                         ,current_job_ref='undefined'
+                                        ,next_compaction_msg='undefined'
                                        }};
 
 compact({'rebuild_views', N, D, DDs}, #state{conn=Conn}=State) ->
@@ -755,18 +803,23 @@ compact(_Msg, State) ->
 compact('status', _, #state{current_node=N
                             ,current_db=D
                             ,queued_jobs=Jobs
+                            ,dbs=Dbs
+                            ,nodes=Ns
                            }= State) ->
     {'reply', {'ok', [{'node', N}
                       ,{'db', D}
                       ,{'queued_jobs', queued_jobs_status(Jobs)}
+                      ,{'nodes_left', length(Ns)}
+                      ,{'dbs_left', length(Dbs)}
                      ]}, 'compact', State};
 
-compact('cancel_current_job', _, #state{current_job_pid=P
+compact('cancel_current_job', _, #state{current_job_pid=Pid
                                         ,current_job_ref=Ref
                                        }=State) ->
-    lager:debug("cancelling job"),
-    maybe_send_update(P, Ref, 'job_cancelled'),
+    lager:debug("cancelling job ~p(~p)", [Pid, Ref]),
+    maybe_send_update(Pid, Ref, 'job_cancelled'),
     gen_fsm:send_event(self(), 'next_job'),
+    lager:debug("returning to 'ready'"),
     {'reply', {'ok', 'job_cancelled'}, 'ready'
      ,State#state{conn='undefined'
                   ,admin_conn='undefined'
@@ -779,14 +832,15 @@ compact('cancel_current_job', _, #state{current_job_pid=P
                   ,current_job_ref='undefined'
                  }};
 compact('cancel_all_jobs', _, #state{queued_jobs=Jobs
-                                     ,current_job_pid=CP
+                                     ,current_job_pid=CPid
                                      ,current_job_ref=CRef
                                   }=State) ->
     lager:debug("cancelling all jobs"),
 
-    maybe_send_update(CP, CRef, 'job_cancelled'),
+    maybe_send_update(CPid, CRef, 'job_cancelled'),
 
     _ = [ maybe_send_update(P, Ref, 'job_cancelled') || {_, P, Ref} <- queue:to_list(Jobs)],
+    lager:debug("returning to 'ready'"),
     {'reply', {'ok', 'jobs_cancelled'}, 'ready'
      ,State#state{conn='undefined'
                   ,admin_conn='undefined'
@@ -817,22 +871,27 @@ wait('status', _, #state{current_node=N
                          ,current_db=D
                          ,wait_ref=Ref
                          ,queued_jobs=Jobs
+                         ,nodes=Ns
+                         ,dbs=Dbs
                         }= State) ->
     {'reply', {'ok', [{'node', N}
                       ,{'db', D}
                       ,{'wait_left', erlang:read_timer(Ref)}
                       ,{'queued_jobs', queued_jobs_status(Jobs)}
+                      ,{'nodes_left', length(Ns)}
+                      ,{'dbs_left', length(Dbs)}
                      ]}
      ,'wait', State};
 
-wait('cancel_current_job', _, #state{current_job_pid=P
+wait('cancel_current_job', _, #state{current_job_pid=Pid
                                      ,current_job_ref=Ref
                                      ,wait_ref=WRef
                                     }=State) ->
     lager:debug("cancelling job"),
-    maybe_send_update(P, Ref, 'job_cancelled'),
+    maybe_send_update(Pid, Ref, 'job_cancelled'),
     _ = erlang:cancel_timer(WRef),
     gen_fsm:send_event(self(), 'next_job'),
+    lager:debug("returning to 'ready'"),
     {'reply', {'ok', 'job_cancelled'}, 'ready', State#state{conn='undefined'
                                                             ,admin_conn='undefined'
                                                             ,current_node='undefined'
@@ -844,16 +903,17 @@ wait('cancel_current_job', _, #state{current_job_pid=P
                                                             ,current_job_ref='undefined'
                                                            }};
 wait('cancel_all_jobs', _, #state{queued_jobs=Jobs
-                                  ,current_job_pid=CP
+                                  ,current_job_pid=CPid
                                   ,current_job_ref=CRef
                                   ,wait_ref=WRef
                                  }=State) ->
     lager:debug("cancelling all jobs"),
 
     _ = erlang:cancel_timer(WRef),
-    maybe_send_update(CP, CRef, 'job_cancelled'),
+    maybe_send_update(CPid, CRef, 'job_cancelled'),
 
     _ = [ maybe_send_update(P, Ref, 'job_cancelled') || {_, P, Ref} <- queue:to_list(Jobs)],
+    lager:debug("returning to 'ready'"),
     {'reply', {'ok', 'jobs_cancelled'}, 'ready', State#state{conn='undefined'
                                                              ,admin_conn='undefined'
                                                              ,current_node='undefined'
@@ -932,11 +992,15 @@ handle_sync_event(_Event, _From, StateName, State) ->
 handle_info('$maybe_start_auto_compaction_job', CurrentState, State) ->
     maybe_start_auto_compaction_job(),
     {'next_state', CurrentState, State};
-handle_info({'DOWN', Ref, 'process', P, _Reason}, 'compact', #state{shards_pid_ref={P, Ref}
-                                                                    ,next_compaction_msg=Msg
+handle_info({'DOWN', Ref, 'process', P, _Reason}, _StateName, #state{shards_pid_ref={P, Ref}
+                                                                     ,next_compaction_msg=Msg
+                                                                     ,wait_ref=_OldWaitRef
                                                                    }=State) ->
     WaitRef = gen_fsm:start_timer(?SLEEP_BETWEEN_COMPACTION, Msg),
-    lager:debug("pidref down ~p(~p) down, waiting in ~p", [P, Ref, WaitRef]),
+    lager:debug("pidref down ~p(~p) down during ~s", [P, Ref, _StateName]),
+    lager:debug("old wait ref: ~p new wait ref: ~p", [_OldWaitRef, WaitRef]),
+    lager:debug("next compaction msg: ~p", [Msg]),
+
     {'next_state', 'wait', State#state{wait_ref=WaitRef
                                        ,next_compaction_msg='undefined'
                                        ,shards_pid_ref='undefined'
@@ -1056,10 +1120,10 @@ rebuild_view(Conn, D, DD, View) ->
     of
         {'error', _E} ->
             lager:debug("error while rebuilding view '~s/~s' has rebuilt on '~s'\: ~p", [DD, View, D, _E]),
-            timer:sleep(?SLEEP_BETWEEN_VIEWS);
+            'ok' = timer:sleep(?SLEEP_BETWEEN_VIEWS);
         {'ok', _} ->
             lager:debug("view '~s/~s' has rebuilt on '~s'", [DD, View, D]),
-            timer:sleep(?SLEEP_BETWEEN_VIEWS)
+            'ok' = timer:sleep(?SLEEP_BETWEEN_VIEWS)
     end.
 
 -spec compact_shards(server(), list(), list()) -> {pid(), reference()}.
@@ -1076,6 +1140,7 @@ compact_shards(AdminConn, Ss, DDs) ->
 
 wait_for_pids(_, []) -> lager:debug("done waiting for compaction pids");
 wait_for_pids(MaxWait, [{P,Ref}|Ps]) ->
+    lager:debug("waiting ~p for compaction pid ~p(~p)", [MaxWait, P, Ref]),
     receive {'DOWN', Ref, 'process', P, _} ->
             lager:debug("recv down from ~p(~p)", [P, Ref]),
             wait_for_pids(MaxWait, Ps)
@@ -1143,7 +1208,7 @@ wait_for_design_compaction(AdminConn, Shard, [DD|DDs]) ->
 
 wait_for_design_compaction(AdminConn, Shard, DDs, DD, {'error', {'conn_failed', {'error', 'timeout'}}}) ->
     lager:debug("connecting to BigCouch timed out, waiting then retrying"),
-    timer:sleep(?SLEEP_BETWEEN_POLL),
+    'ok' = timer:sleep(?SLEEP_BETWEEN_POLL),
     wait_for_design_compaction(AdminConn, Shard, DDs, DD, couch_util:design_info(AdminConn, Shard, DD));
 wait_for_design_compaction(AdminConn, Shard, DDs, _DD, {'error', _E}) ->
     lager:debug("failed design status for '~s': ~p", [_DD, _E]),
@@ -1169,13 +1234,13 @@ wait_for_compaction(AdminConn, S, {'error', _E}) ->
     wait_for_compaction(AdminConn, S);
 wait_for_compaction(AdminConn, S, {'ok', ShardData}) ->
     case wh_json:is_true(<<"compact_running">>, ShardData, 'false') of
-        'false' -> 'ok';
+        'false' -> lager:debug("compaction has ended");
         'true' ->
             'ok' = timer:sleep(?SLEEP_BETWEEN_POLL),
             wait_for_compaction(AdminConn, S)
     end.
 
-get_node_connections({N, Opts}, Cookie) ->
+get_node_connections({N, Opts}, ConfigCookie) ->
     lager:debug("getting connections from opts: ~p", [Opts]),
     [_, Host] = binary:split(N, <<"@">>),
 
@@ -1184,6 +1249,7 @@ get_node_connections({N, Opts}, Cookie) ->
                     ,props:get_value('password', Opts, ConfigPass)
                    },
 
+    Cookie = props:get_value('cookie', Opts, ConfigCookie),
     {ConfigPort, ConfigAdminPort} = get_ports(wh_util:to_atom(N, 'true'), Cookie),
     {Port, AdminPort} = {props:get_value('port', Opts, ConfigPort)
                          ,props:get_value('admin_port', Opts, ConfigAdminPort)
@@ -1261,8 +1327,10 @@ maybe_start_auto_compaction_job() ->
         (catch wh_couch_connections:test_admin_conn())
     of
         {'ok', _} ->
+            lager:debug("sending compact after timeout"),
             gen_fsm:send_event_after(?AUTOCOMPACTION_CHECK_TIMEOUT, 'compact');
         _ ->
+            lager:debug("starting timer for autocompaction"),
             erlang:send_after(?AUTOCOMPACTION_CHECK_TIMEOUT, self(), '$maybe_start_auto_compaction_job'),
             'ok'
     end.
@@ -1316,7 +1384,7 @@ get_db_disk_and_data(Conn, Encoded, N) ->
             };
         {'error', {'conn_failed',{'error','timeout'}}} ->
             lager:debug("timed out asking for info, waiting and trying again"),
-            timer:sleep(100),
+            'ok' = timer:sleep(1000),
             get_db_disk_and_data(Conn, Encoded, N+1);
         {'error', 'not_found'} ->
             lager:debug("db '~s' not found, skipping", [Encoded]),

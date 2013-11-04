@@ -27,6 +27,8 @@
 -export([get_account_realm/1, get_account_realm/2]).
 -export([disable_account/1, enable_account/1, change_pvt_enabled/2]).
 -export([get_path/2]).
+-export([get_user_lang/2]).
+-export([get_account_lang/1]).
 
 -include("crossbar.hrl").
 
@@ -327,15 +329,27 @@ enable_account(AccountId) ->
 %%--------------------------------------------------------------------
 -spec response_auth(wh_json:object()) -> wh_json:object().
 response_auth(JObj) ->
-    AccountId = wh_json:get_value(<<"account_id">>, JObj, <<>>),
-    OwnerId = wh_json:get_value(<<"owner_id">>, JObj, <<>>),
+    AccountId = wh_json:get_value(<<"account_id">>, JObj, 'undefined'),
+    OwnerId = wh_json:get_value(<<"owner_id">>, JObj, 'undefined'),
+    ConfId = wh_json:get_value(<<"conference_id">>, JObj, 'undefined'),
+    IsModerator = wh_json:get_value(<<"is_moderator">>, JObj, 'undefined'),
+    Apps = wh_json:get_value(<<"apps">>, JObj, 'undefined'),
+    Lang = wh_json:get_value(<<"language">>, JObj, 'undefined'),
     IsReseller = wh_services:is_reseller(AccountId),
     ResellerId = wh_services:find_reseller_id(AccountId),
-    wh_json:from_list([{<<"account_id">>, AccountId}
-                       ,{<<"owner_id">>, OwnerId}
-                       ,{<<"is_reseller">>, IsReseller}
-                       ,{<<"reseller_id">>, ResellerId}
-                      ]).
+    wh_json:from_list(
+        props:filter_undefined(
+            [{<<"account_id">>, AccountId}
+             ,{<<"owner_id">>, OwnerId}
+             ,{<<"is_reseller">>, IsReseller}
+             ,{<<"reseller_id">>, ResellerId}
+             ,{<<"conference_id">>, ConfId}
+             ,{<<"is_moderator">>, IsModerator}
+             ,{<<"apps">>, Apps}
+             ,{<<"language">>, Lang}
+            ]
+        )
+    ).
 
 %%--------------------------------------------------------------------
 %% @public
@@ -360,6 +374,34 @@ change_pvt_enabled(State, AccountId) ->
         _:R ->
             lager:debug("unable to set pvt_enabled to ~s on account ~s: ~p", [State, AccountId, R]),
             {'error', R}
+    end.
+
+-spec get_user_lang(ne_binary(), ne_binary()) -> 'error' | {'ok', ne_binary()}.
+get_user_lang(AccountId, UserId) ->
+    AccountDb = wh_util:format_account_id(AccountId, 'encoded'),
+    case couch_mgr:open_cache_doc(AccountDb, UserId) of
+        {'ok', JObj} ->
+            case wh_json:get_value(<<"language">>, JObj) of
+                'undefined' -> 'error';
+                Lang -> {'ok', Lang}
+            end;
+        {'error', _E} ->
+            lager:error("failed to lookup user ~p in ~p : ~p", [UserId, AccountId, _E]),
+            'error'
+    end.
+
+-spec get_account_lang(ne_binary()) -> 'error' | {'ok', ne_binary()}.
+get_account_lang(AccountId) ->
+    AccountDb = wh_util:format_account_id(AccountId, 'encoded'),
+    case couch_mgr:open_cache_doc(AccountDb, AccountId) of
+        {'ok', JObj} ->
+            case wh_json:get_value(<<"language">>, JObj) of
+                'undefined' -> 'error';
+                Lang -> {'ok', Lang}
+            end;
+        {'error', _E} ->
+            lager:error("failed to lookup account ~p : ~p", [AccountId, _E]),
+            'error'
     end.
 
 -spec get_path(cowboy_req:req(), ne_binary()) -> ne_binary().

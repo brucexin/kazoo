@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%%% @copyright (C) 2011-2012, VoIP INC
+%%% @copyright (C) 2011-2013, 2600Hz INC
 %%% @doc
 %%% Directory lookups from FS
 %%% @end
@@ -29,7 +29,7 @@
 
 -include("ecallmgr.hrl").
 
--record(state, {node = 'undefined' :: atom()
+-record(state, {node :: atom()
                 ,options = [] :: wh_proplist()
                }).
 
@@ -66,7 +66,9 @@ init([Node, Options]) ->
     put('callid', Node),
     lager:info("starting new fs authn listener for ~s", [Node]),
     gen_server:cast(self(), 'bind_to_directory'),
-    {'ok', #state{node=Node, options=Options}}.
+    {'ok', #state{node=Node
+                  ,options=Options
+                 }}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -165,6 +167,7 @@ handle_directory_lookup(Id, Props, Node) ->
         Else ->
             lager:debug("received fetch request for ~s (~s) user creds from ~s", [Else, Id, Node])
     end,
+    whistle_stats:increment_counter("register-attempt"),
     case {props:get_value(<<"Event-Name">>, Props), props:get_value(<<"action">>, Props)} of
         {<<"REQUEST_PARAMS">>, <<"sip_auth">>} ->
             Method = props:get_value(<<"sip_auth_method">>, Props),
@@ -235,7 +238,19 @@ query_registrar(Realm, Username, Node, Id, Method, Props) ->
                                  ),
     case ReqResp of
         {'error', _}=E -> E;
-        {'ok', JObj}=Ok ->
+        {'ok', JObj} -> maybe_defered_error(Realm, Username, JObj)
+    end.
+
+%% NOTE: Kamailio needs registrar errors since it is blocking with no
+%%   timeout (at the moment) but when we seek auth for INVITEs we need
+%%   to wait for conferences, ect.  Since Kamailio does not honor
+%%   Defer-Response we can use that flag on registrar errors
+%%   to queue in Kazoo but still advance Kamailio, just need to check here.
+-spec maybe_defered_error(ne_binary(), ne_binary(), wh_json:object()) -> {'ok', wh_json:object()} | {'error', 'timeout'}.
+maybe_defered_error(Realm, Username, JObj) ->
+    case wapi_authn:resp_v(JObj) of
+        'false' -> {'error', 'timeout'};
+        'true' ->
             lager:debug("received authn information"),
             AccountId = wh_json:get_value([<<"Custom-Channel-Vars">>, <<"Account-ID">>], JObj),
             AccountDb = wh_util:format_account_id(AccountId, 'encoded'),
@@ -245,5 +260,6 @@ query_registrar(Realm, Username, Node, Id, Method, Props) ->
                                      ]}
                          ],
             wh_cache:store_local(?ECALLMGR_AUTH_CACHE, ?CREDS_KEY(Realm, Username), JObj, CacheProps),
-            Ok
+            {'ok', JObj}
     end.
+

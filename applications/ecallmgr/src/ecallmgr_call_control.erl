@@ -48,7 +48,7 @@
 -behaviour(gen_listener).
 
 %% API
--export([start_link/3, stop/1]).
+-export([start_link/5, stop/1]).
 -export([handle_call_command/2]).
 -export([handle_conference_command/2]).
 -export([handle_call_events/2]).
@@ -82,7 +82,6 @@
 -record(state, {
           node :: atom()
          ,callid :: ne_binary()
-         ,self :: 'undefined' | pid()
          ,command_q = queue:new() :: queue()
          ,current_app :: api_binary()
          ,current_cmd :: api_object()
@@ -95,7 +94,10 @@
          ,sanity_check_tref :: api_reference()
          ,msg_id :: api_binary()
          ,fetch_id :: api_binary()
+         ,controller_q :: api_binary()
+         ,initial_ccvs :: wh_json:object()
          }).
+-type state() :: #state{}.
 
 -define(RESPONDERS, [{{?MODULE, 'handle_call_command'}
                       ,[{<<"call">>, <<"command">>}]
@@ -122,8 +124,8 @@
 %% @spec start_link() -> {ok, Pid} | ignore | {error, Error}
 %% @end
 %%--------------------------------------------------------------------
--spec start_link(atom(), ne_binary(), api_binary()) -> startlink_ret().
-start_link(Node, CallId, FetchId) ->
+-spec start_link(atom(), ne_binary(), api_binary(), api_binary(), wh_json:new()) -> startlink_ret().
+start_link(Node, CallId, FetchId, ControllerQ, CCVs) ->
     %% We need to become completely decoupled from ecallmgr_call_events
     %% because the call_events process might have been spun up with A->B
     %% then transfered to A->D, but the route landed in a different
@@ -142,7 +144,7 @@ start_link(Node, CallId, FetchId) ->
                                       ,{'queue_options', ?QUEUE_OPTIONS}
                                       ,{'consume_options', ?CONSUME_OPTIONS}
                                      ]
-                            ,[Node, CallId, FetchId]).
+                            ,[Node, CallId, FetchId, ControllerQ, CCVs]).
 
 -spec stop(pid()) -> 'ok'.
 stop(Srv) ->
@@ -201,10 +203,11 @@ handle_call_events(JObj, Props) ->
     put('callid', wh_json:get_value(<<"Call-ID">>, JObj)),
     case wh_json:get_value(<<"Event-Name">>, JObj) of
         <<"usurp_control">> ->
-            Q = props:get_value('queue', Props),
-            case wh_json:get_value(<<"Control-Queue">>, JObj) of
-                Q -> 'ok';
-                _Else -> gen_listener:cast(Srv, {'usurp_control', JObj})
+            case wh_json:get_value(<<"Fetch-ID">>, JObj)
+                =:= props:get_value('fetch_id', Props)
+            of
+                'false' -> gen_listener:cast(Srv, {'usurp_control', JObj});
+                'true' -> 'ok'
             end;
         _Else -> 'ok'
     end.
@@ -224,16 +227,17 @@ handle_call_events(JObj, Props) ->
 %%                     {stop, Reason}
 %% @end
 %%--------------------------------------------------------------------
-init([Node, CallId, FetchId]) ->
+init([Node, CallId, FetchId, ControllerQ, CCVs]) ->
     put('callid', CallId),
     lager:debug("starting call control listener"),
     gen_listener:cast(self(), 'init'),
     {'ok', #state{node=Node
                   ,callid=CallId
                   ,command_q=queue:new()
-                  ,self=self()
                   ,start_time=erlang:now()
                   ,fetch_id=FetchId
+                  ,controller_q=ControllerQ
+                  ,initial_ccvs=CCVs
                  }}.
 
 %%--------------------------------------------------------------------
@@ -364,7 +368,7 @@ handle_cast({'channel_destroyed', CallId, JObj},  #state{is_call_up='true'
                          }
              ,'hibernate'};
         'true' ->
-            lager:debug("channel destroy while moving to other node, deferring to new controller", []),
+            lager:debug("channel destroy while moving to other node, deferring to new controller"),
             {'stop', 'normal', State}
     end;
 handle_cast({'channel_destroyed', CallId, _},  #state{is_call_up='false'
@@ -410,6 +414,35 @@ handle_cast({'dialplan', JObj}, #state{callid=CallId
     end;
 handle_cast({'event_execute_complete', CallId, AppName, JObj}, #state{callid=CallId}=State) ->
     {'noreply', handle_event_execute_complete(AppName, JObj, State)};
+handle_cast({'gen_listener', {'created_queue', _}}, #state{controller_q='undefined'}=State) ->
+    {'noreply', State};
+handle_cast({'gen_listener', {'created_queue', Q}}, #state{callid=CallId
+                                                           ,controller_q=ControllerQ
+                                                           ,initial_ccvs=CCVs
+                                                           ,fetch_id=FetchId
+                                                           ,node=Node
+                                                          }=State) ->
+    Win = [{<<"Msg-ID">>, CallId}
+           ,{<<"Call-ID">>, CallId}
+           ,{<<"Control-Queue">>, Q}
+           ,{<<"Custom-Channel-Vars">>, CCVs}
+           | wh_api:default_headers(Q, <<"dialplan">>, <<"route_win">>, ?APP_NAME, ?APP_VERSION)
+          ],
+    lager:debug("sending route_win to ~s", [ControllerQ]),
+    wapi_route:publish_win(ControllerQ, Win),
+    Usurp = [{<<"Call-ID">>, CallId}
+             ,{<<"Fetch-ID">>, FetchId}
+             ,{<<"Reason">>, <<"Route-Win">>}
+             ,{<<"Media-Node">>, wh_util:to_binary(Node)}
+             | wh_api:default_headers(?APP_NAME, ?APP_VERSION)
+            ],
+    lager:debug("sending control usurp for ~s", [FetchId]),
+    wapi_call:publish_usurp_control(CallId, Usurp),
+    {'noreply', State};
+handle_cast({'gen_listener',{'is_consuming',_IsConsuming}}, State) ->
+    {'noreply', State};
+handle_cast({'wh_amqp_channel',{'new_channel',_IsNew}}, State) ->
+    {'noreply', State};
 handle_cast(_, State) ->
     {'noreply', State}.
 
@@ -443,10 +476,10 @@ handle_info({'event', [CallId | Props]}, #state{callid=CallId
         <<"sofia::transferee">> ->
             case props:get_value(?GET_CCV(<<"Fetch-ID">>), Props) of
                 FetchId ->
-                    lager:info("we have been transfered, terminate immediately", []),
+                    lager:info("we have been transfered, terminate immediately"),
                     {'stop', 'normal', State};
                 _Else ->
-                    lager:info("we were a different instance of this transfered call", []),
+                    lager:info("we were a different instance of this transfered call"),
                     {'noreply', State}
             end;
         <<"sofia::replaced">> ->
@@ -459,7 +492,8 @@ handle_info({'event', [CallId | Props]}, #state{callid=CallId
                     {'noreply', State}
             end;
         <<"CHANNEL_EXECUTE">> when Application =:= <<"redirect">> ->
-            gen_listener:cast(self(), {'channel_redirected', JObj});
+            gen_listener:cast(self(), {'channel_redirected', JObj}),
+            {'stop', 'normal', State};
         _Else ->
             {'noreply', State}
     end;
@@ -536,7 +570,7 @@ handle_info('sanity_check', #state{callid=CallId
             TRef = erlang:send_after(?SANITY_CHECK_PERIOD, self(), 'sanity_check'),
             {'noreply', State#state{sanity_check_tref=TRef}};
         'false' ->
-            lager:debug("call uuid does not exist, executing post-hangup events and terminating", []),
+            lager:debug("call uuid does not exist, executing post-hangup events and terminating"),
             gen_listener:cast(self(), {'channel_destroyed', wh_json:new()}),
             {'noreply', State}
     end;
@@ -557,8 +591,8 @@ handle_info(_Msg, State) ->
 %% @spec handle_event(JObj, State) -> {reply, Options}
 %% @end
 %%--------------------------------------------------------------------
-handle_event(_JObj, _State) ->
-    {'reply', []}.
+handle_event(_JObj, #state{fetch_id=FetchId}) ->
+    {'reply', [{'fetch_id', FetchId}]}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -594,7 +628,7 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
--spec handle_event_execute_complete(api_binary(), wh_json:object(), #state{}) -> #state{}.
+-spec handle_event_execute_complete(api_binary(), wh_json:object(), state()) -> state().
 handle_event_execute_complete('undefined', _, State) ->
     State;
 handle_event_execute_complete(<<"noop">>, JObj, #state{msg_id=CurrMsgId}=State) ->
@@ -632,7 +666,7 @@ handle_event_execute_complete(AppName, JObj, #state{current_app=CurrApp}=State) 
             handle_event_execute_complete(CurrApp, JObj, State)
     end.
 
--spec handle_sofia_replaced(ne_binary(), #state{}) -> #state{}.
+-spec handle_sofia_replaced(ne_binary(), state()) -> state().
 handle_sofia_replaced(CallId, #state{callid=CallId}=State) ->
     State;
 handle_sofia_replaced(ReplacedBy, #state{callid=CallId, node=Node, other_legs=Legs}=State) ->
@@ -673,7 +707,7 @@ flush_group_id(CmdQ, GroupId, AppName) ->
                                ]),
     maybe_filter_queue([Filter], CmdQ).
 
--spec forward_queue(#state{}) -> #state{}.
+-spec forward_queue(state()) -> state().
 forward_queue(#state{callid = CallId
                      ,is_node_up = INU
                      ,is_call_up = CallUp
@@ -705,7 +739,7 @@ forward_queue(#state{callid = CallId
     end.
 
 %% execute all commands in JObj immediately, irregardless of what is running (if anything).
--spec insert_command(#state{}, insert_at_options(), wh_json:object()) -> queue().
+-spec insert_command(state(), insert_at_options(), wh_json:object()) -> queue().
 insert_command(#state{node=Node
                       ,callid=CallId
                       ,command_q=CommandQ
@@ -858,12 +892,12 @@ maybe_filter_queue([AppJObj|T]=Apps, CommandQ) ->
 is_post_hangup_command(AppName) ->
     lists:member(AppName, ?POST_HANGUP_COMMANDS).
 
--spec execute_control_request(wh_json:object(), #state{}) -> 'ok'.
+-spec execute_control_request(wh_json:object(), state()) -> 'ok'.
 execute_control_request(Cmd, #state{node=Node
                                     ,callid=CallId
-                                    ,self=Srv
                                    }) ->
     put('callid', CallId),
+    Srv = self(),
     try
         lager:debug("executing call command '~s' ~s", [wh_json:get_value(<<"Application-Name">>, Cmd)
                                                        ,wh_json:get_value(<<"Msg-ID">>, Cmd, <<>>)
@@ -929,7 +963,7 @@ send_error_resp(CallId, Cmd, Msg) ->
     lager:debug("sending execution error: ~p", [Resp]),
     wapi_dialplan:publish_error(CallId, Resp).
 
--spec get_keep_alive_ref(#state{}) -> 'undefined' | reference().
+-spec get_keep_alive_ref(state()) -> 'undefined' | reference().
 get_keep_alive_ref(#state{is_call_up='true'}) -> 'undefined';
 get_keep_alive_ref(#state{keep_alive_ref='undefined'
                           ,is_call_up='false'

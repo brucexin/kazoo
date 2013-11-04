@@ -6,6 +6,7 @@
 %%% @contributors
 %%%   James Aimonetti
 %%%   Edouard Swiac
+%%%   Ben Wann
 %%%-------------------------------------------------------------------
 -module(cdr_listener).
 
@@ -34,9 +35,9 @@
 -define(BINDINGS, [{'call', [{'restrict_to', ['cdr']}
                              ,{'callid', <<"*">>}
                             ]}]).
--define(QUEUE_NAME, <<>>).
--define(QUEUE_OPTIONS, []).
--define(CONSUME_OPTIONS, []).
+-define(QUEUE_NAME, <<"cdr_listener">>).
+-define(QUEUE_OPTIONS, [{'exclusive', 'false'}]).
+-define(CONSUME_OPTIONS, [{'exclusive', 'false'}]).
 
 %%%===================================================================
 %%% API
@@ -61,9 +62,9 @@ start_link() ->
 handle_cdr(JObj, _Props) ->
     'true' = wapi_call:cdr_v(JObj),
     _ = wh_util:put_callid(JObj),
-    CallId = wh_json:get_value(<<"Call-ID">>, JObj, couch_mgr:get_uuid()),
     AccountId = wh_json:get_value([<<"Custom-Channel-Vars">>,<<"Account-ID">>], JObj),
-    maybe_save_in_account(AccountId, wh_json:set_value(<<"_id">>, CallId, wh_json:normalize_jobj(JObj))).
+    Timestamp = wh_json:get_integer_value(<<"Timestamp">>, JObj),
+    prepare_and_save(AccountId, Timestamp, JObj).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -158,60 +159,45 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
--spec maybe_save_in_account(api_binary(), wh_json:object()) -> 'ok'.
-maybe_save_in_account('undefined', JObj) ->
-    save_in_anonymous_cdrs(JObj);
-maybe_save_in_account(AccountId, JObj) ->
-    AccountDb = wh_util:format_account_id(AccountId, 'encoded'),
+-spec prepare_and_save(account_id(), pos_integer(), wh_json:object()) -> wh_json:object().
+prepare_and_save(AccountId, Timestamp, JObj) ->
+    Routines = [fun normalize/3
+                ,fun update_pvt_parameters/3
+                ,fun set_doc_id/3
+                ,fun save_cdr/3
+               ],
+    lists:foldl(fun(F, J) ->
+                        F(AccountId, Timestamp, J) 
+                end, JObj, Routines).
+
+-spec normalize(api_binary(), pos_integer(), wh_json:object()) -> wh_json:object().
+normalize(_, _, JObj) ->
+    wh_json:normalize_jobj(JObj).    
+
+-spec update_pvt_parameters(api_binary(), pos_integer(), wh_json:object()) -> wh_json:object().
+update_pvt_parameters('undefined', _, JObj) ->
     Props = [{'type', 'cdr'}
              ,{'crossbar_doc_vsn', 2}
             ],
-    J = wh_doc:update_pvt_parameters(JObj, AccountDb, Props),
-    case couch_mgr:save_doc(AccountDb, J) of
-        {'error', 'not_found'} -> save_in_anonymous_cdrs(JObj);
-        {'error', _} -> 'ok';
-        {'ok', _} -> 'ok'
-    end.
-
--spec save_in_anonymous_cdrs(wh_json:object()) -> 'ok'.
-save_in_anonymous_cdrs(JObj) ->
+    wh_doc:update_pvt_parameters(JObj, ?WH_ANONYMOUS_CDR_DB, Props);
+update_pvt_parameters(AccountId, Timestamp, JObj) ->
+    AccountMODb = wh_util:format_account_id(AccountId, Timestamp),    
     Props = [{'type', 'cdr'}
              ,{'crossbar_doc_vsn', 2}
             ],
-    J = wh_doc:update_pvt_parameters(JObj, ?WH_ANONYMOUS_CDR_DB, Props),
-    case couch_mgr:save_doc(?WH_ANONYMOUS_CDR_DB, J) of
-        {'error', 'not_found'} ->
-            'undefined' = get('attempted_db_create'),
-            _ = create_anonymous_cdr_db(),
-            put('attempted_db_create', 'true'),
-            save_in_anonymous_cdrs(JObj);
-        {'error', 'conflict'} -> 'ok';
-        {'ok', _} -> 'ok'
+    wh_doc:update_pvt_parameters(JObj, AccountMODb, Props).
+
+-spec set_doc_id(api_binary(), pos_integer(), wh_json:object()) -> wh_json:object().
+set_doc_id(_, Timestamp, JObj) ->
+    CallId = wh_json:get_value(<<"call_id">>, JObj),
+    DocId = cdr_util:get_cdr_doc_id(Timestamp, CallId),
+    wh_json:set_value(<<"_id">>, DocId, JObj).
+
+-spec save_cdr(api_binary(), pos_integer(), wh_json:object()) -> wh_json:object().
+save_cdr(_, _, JObj) ->
+    CDRDb = wh_json:get_value(<<"pvt_account_db">>, JObj),
+    case cdr_util:save_cdr(CDRDb, JObj) of
+        {'error', 'max_retries'} -> 
+            lager:error("write fail: ~s", [CDRDb]);
+        'ok' -> 'ok'
     end.
-
--spec create_anonymous_cdr_db() -> {'ok', wh_json:object()} |
-                                   {'error', term()}.
-create_anonymous_cdr_db() ->
-    couch_mgr:db_create(?WH_ANONYMOUS_CDR_DB),
-    couch_mgr:revise_doc_from_file(?WH_ANONYMOUS_CDR_DB, 'cdr', <<"cdr.json">>).
-
--spec determine_account_cdr_db(ne_binary()) -> ne_binary().
-determine_account_cdr_db(Account) ->
-    AccountId = wh_util:format_account_id(Account, 'raw'),
-    AccountDb = wh_util:format_account_id(Account, 'encoded'),
-    case should_store_in_seperate_db(AccountDb, AccountId) of
-        'false' -> AccountDb;
-        'true' -> seperate_cdr_db(AccountId)
-    end.
-
--spec should_store_in_seperate_db(ne_binary(), ne_binary()) -> boolean().
-should_store_in_seperate_db(AccountDb, AccountId) ->
-    case couch_mgr:open_cache_doc(AccountDb, AccountId) of
-        {'error', _} -> 'false';
-        {'ok', JObj} ->
-            wh_json:is_true(<<"pvt_seperate_cdr">>, JObj)
-    end.
-
--spec seperate_cdr_db(ne_binary()) -> ne_binary().
-seperate_cdr_db(AccountId) ->
-    <<"cdrs%2F", AccountId/binary>>.

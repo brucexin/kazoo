@@ -217,17 +217,16 @@ test_for_registrations(AccountId, AccountDb, Realm) ->
           ],
     case whapps_util:amqp_pool_collect(Reg
                                        ,fun wapi_registration:publish_query_req/1
-                                       ,'ecallmgr'
-                                       ,2000) 
+                                       ,{'ecallmgr', fun wapi_registration:query_resp_v/1})
     of
-        {'ok', JObjs} -> 
+        {'error', _} -> 'ok';
+        {_, JObjs} ->
             case lists:any(fun wapi_registration:query_resp_v/1, JObjs) of
                 'false' -> 'ok';
                 'true' ->
                     lager:debug("found initial registration for account ~s (~s)", [AccountId, Realm]),
                     handle_initial_registration(AccountId, AccountDb)
-            end;
-        _Else -> 'ok'
+            end
     end.
 
 -spec handle_initial_registration(ne_binary(), ne_binary()) -> 'ok'.
@@ -303,7 +302,7 @@ maybe_test_for_low_balance(AccountId, AccountDb, JObj) ->
 test_for_low_balance(AccountId, AccountDb, JObj) ->
     Threshold = low_balance_threshold(AccountDb),
     CurrentBalance = wht_util:current_balance(AccountId),
-    lager:debug("checking if account ~s balance is bellow $~w", [AccountId, Threshold]),
+    lager:debug("checking if account ~s balance is below $~w", [AccountId, Threshold]),
     case CurrentBalance < wht_util:dollars_to_units(Threshold) of
         'false' ->
             maybe_reset_low_balance(AccountId, AccountDb, JObj);
@@ -338,8 +337,8 @@ reset_low_balance(AccountId, AccountDb) ->
 
 -spec maybe_handle_low_balance(integer(), ne_binary(), ne_binary(), wh_json:object()) -> 'ok'.
 maybe_handle_low_balance(CurrentBalance, AccountId, AccountDb, JObj) ->
-    case wh_json:is_true([<<"notifications">>, <<"low_balance">>, <<"sent_low_balance">>], JObj) 
-        orelse wh_json:get_value([<<"notifications">>, <<"low_balance">>, <<"sent_low_balance">>], JObj) =:= 'undefined' 
+    case wh_json:is_true([<<"notifications">>, <<"low_balance">>, <<"sent_low_balance">>], JObj)
+        orelse wh_json:get_value([<<"notifications">>, <<"low_balance">>, <<"sent_low_balance">>], JObj) =:= 'undefined'
     of
         'true' -> 'ok';
         'false' ->

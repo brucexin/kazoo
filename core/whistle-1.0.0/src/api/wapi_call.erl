@@ -33,6 +33,7 @@
 -export([usurp_publisher/1, usurp_publisher_v/1]).
 
 -export([bind_q/2, unbind_q/2]).
+-export([declare_exchanges/0]).
 
 -export([publish_new_channel/1, publish_new_channel/2]).
 -export([publish_destroy_channel/1, publish_destroy_channel/2]).
@@ -177,12 +178,14 @@
 -define(QUERY_AUTH_ID_RESP_TYPES, []).
 
 %% Query User Channels Req
--define(QUERY_USER_CHANNELS_REQ_HEADERS, [<<"Username">>, <<"Realm">>]).
--define(OPTIONAL_QUERY_USER_CHANNELS_REQ_HEADERS, []).
+-define(QUERY_USER_CHANNELS_REQ_HEADERS, [<<"Realm">>]).
+-define(OPTIONAL_QUERY_USER_CHANNELS_REQ_HEADERS, [<<"Usernames">>, <<"Username">>]).
 -define(QUERY_USER_CHANNELS_REQ_VALUES, [{<<"Event-Category">>, <<"call_event">>}
                                          ,{<<"Event-Name">>, <<"query_user_channels_req">>}
                                         ]).
--define(QUERY_USER_CHANNELS_REQ_TYPES, []).
+-define(QUERY_USER_CHANNELS_REQ_TYPES, [{<<"Usernames">>, fun erlang:is_list/1}
+                                        ,{<<"Username">>, fun erlang:is_binary/1}
+                                       ]).
 
 %% Query User Channels Resp
 -define(QUERY_USER_CHANNELS_RESP_HEADERS, []).
@@ -198,10 +201,9 @@
                                         ,<<"Remote-SDP">>, <<"Local-SDP">>, <<"Caller-ID-Name">>
                                         ,<<"Caller-ID-Number">>, <<"Callee-ID-Name">>, <<"Callee-ID-Number">>
                                         ,<<"User-Agent">>, <<"Caller-ID-Type">>, <<"Other-Leg-Call-ID">>
-                                        ,<<"Timestamp">>, <<"Request">>
+                                        ,<<"Timestamp">>, <<"Duration-Seconds">>, <<"Billing-Seconds">>, <<"Ringing-Seconds">>
                                         ,<<"Call-Direction">>, <<"To-Uri">>, <<"From-Uri">>
-                                        ,<<"Duration-Seconds">>, <<"Billing-Seconds">>, <<"Ringing-Seconds">>
-                                        ,<<"Digits-Dialed">>
+                                        ,<<"Digits-Dialed">>, <<"To">>, <<"From">>, <<"Request">>
                                    ]).
 -define(CALL_CDR_VALUES, [{<<"Event-Category">>, <<"call_detail">>}
                           ,{<<"Event-Name">>, <<"cdr">>}
@@ -211,7 +213,7 @@
 -define(CALL_CDR_TYPES, [{<<"Custom-Channel-Vars">>, fun wh_json:is_json_object/1}]).
 
 %% Call Usurp Control
--define(CALL_USURP_CONTROL_HEADERS, [<<"Call-ID">>, <<"Control-Queue">>, <<"Controller-Queue">>]).
+-define(CALL_USURP_CONTROL_HEADERS, [<<"Call-ID">>, <<"Fetch-ID">>]).
 -define(OPTIONAL_CALL_USURP_CONTROL_HEADERS, [<<"Reason">>, <<"Media-Node">>]).
 -define(CALL_USURP_CONTROL_VALUES, [{<<"Event-Category">>, <<"call_event">>}
                                     ,{<<"Event-Name">>, <<"usurp_control">>}
@@ -503,8 +505,6 @@ usurp_publisher_v(JObj) -> usurp_publisher_v(wh_json:to_proplist(JObj)).
 -spec bind_q(ne_binary(), wh_proplist()) -> 'ok'.
 bind_q(Queue, Props) ->
     CallId = props:get_value('callid', Props, <<"*">>),
-    amqp_util:callevt_exchange(),
-    amqp_util:callmgr_exchange(),
     bind_q(Queue, props:get_value('restrict_to', Props), CallId).
 
 bind_q(Q, 'undefined', CallId) ->
@@ -569,6 +569,16 @@ unbind_q(Q, ['publisher_usurp'|T], CallId) ->
     unbind_q(Q, T, CallId);
 unbind_q(Q, [_|T], CallId) -> unbind_q(Q, T, CallId);
 unbind_q(_Q, [], _CallId) -> 'ok'.
+
+%%--------------------------------------------------------------------
+%% @doc
+%% declare the exchanges used by this API
+%% @end
+%%--------------------------------------------------------------------
+-spec declare_exchanges() -> 'ok'.
+declare_exchanges() ->
+    amqp_util:callevt_exchange(),
+    amqp_util:callmgr_exchange().    
 
 -spec publish_event(ne_binary(), api_terms()) -> 'ok'.
 -spec publish_event(ne_binary(), api_terms(), ne_binary()) -> 'ok'.
@@ -690,6 +700,10 @@ publish_query_user_channels_req(JObj) ->
                                     ,wh_json:get_value(<<"Realm">>, JObj)
                                     ,?DEFAULT_CONTENT_TYPE
                                    ).
+
+publish_query_user_channels_req(Req, 'undefined', Realm, ContentType) ->
+    Username = first_username(Req),
+    publish_query_user_channels_req(Req, Username, Realm, ContentType);
 publish_query_user_channels_req(Req, Username, Realm, ContentType) ->
     {'ok', Payload} = wh_api:prepare_api_payload(Req, ?QUERY_USER_CHANNELS_REQ_VALUES, fun ?MODULE:query_user_channels_req/1),
     amqp_util:callevt_publish(<<Username/binary, ":", Realm/binary>>, Payload, 'status_req', ContentType).
@@ -729,3 +743,11 @@ publish_usurp_publisher(CallId, JObj, ContentType) ->
 -spec get_status(api_terms()) -> ne_binary().
 get_status(API) when is_list(API) -> props:get_value(<<"Status">>, API);
 get_status(API) -> wh_json:get_value(<<"Status">>, API).
+
+-spec first_username(api_terms()) -> ne_binary().
+first_username(Props) when is_list(Props) ->
+    [U|_] = props:get_value(<<"Usernames">>, Props),
+    U;
+first_username(JObj) ->
+    [U|_] = wh_json:get_value(<<"Usernames">>, JObj),
+    U.

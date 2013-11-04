@@ -20,12 +20,11 @@
          ,exists/1
          ,import_moh/1
          ,set_account_id/2
-         ,fetch/1
+         ,fetch/1, fetch/2
          ,renew/2
          ,to_json/1
          ,to_props/1
         ]).
--export([handle_channel_status/2]).
 -export([process_event/3]).
 -export([init/1
          ,handle_call/3
@@ -39,15 +38,6 @@
 -compile([{'no_auto_import', [node/1]}]).
 
 -include("ecallmgr.hrl").
-
--define(RESPONDERS, [{{?MODULE, 'handle_channel_status'}
-                      ,[{<<"call_event">>, <<"channel_status_req">>}]
-                     }
-                    ]).
--define(BINDINGS, [{'call', [{'restrict_to', ['status_req']}]}]).
--define(QUEUE_NAME, <<>>).
--define(QUEUE_OPTIONS, []).
--define(CONSUME_OPTIONS, []).
 
 -record(state, {node = 'undefined' :: atom()
                 ,options = [] :: wh_proplist()
@@ -68,21 +58,31 @@ start_link(Node) ->
     start_link(Node, []).
 
 start_link(Node, Options) ->
-    gen_listener:start_link(?MODULE, [{'responders', ?RESPONDERS}
-                                      ,{'bindings', ?BINDINGS}
-                                      ,{'queue_name', ?QUEUE_NAME}
-                                      ,{'queue_options', ?QUEUE_OPTIONS}
-                                      ,{'consume_options', ?CONSUME_OPTIONS}
-                                     ], [Node, Options]).
+    gen_server:start_link(?MODULE, [Node, Options], []).
+
+-type fetch_resp() :: wh_json:object() |
+                      wh_proplist() |
+                      channel().
+-type channel_format() :: 'json' | 'proplist' | 'record'.
 
 -spec fetch(ne_binary()) ->
-                   {'ok', wh_json:object()} |
+                   {'ok', fetch_resp()} |
+                   {'error', 'not_found'}.
+-spec fetch(ne_binary(), channel_format()) ->
+                   {'ok', fetch_resp()} |
                    {'error', 'not_found'}.
 fetch(UUID) ->
+    fetch(UUID, 'json').
+fetch(UUID, Format) ->
     case ets:lookup(?CHANNELS_TBL, UUID) of
-        [Channel] -> {'ok', to_json(Channel)};
+        [Channel] -> {'ok', format(Format, Channel)};
         _Else -> {'error', 'not_found'}
     end.
+
+-spec format(channel_format(), channel()) -> fetch_resp().
+format('json', Channel) -> to_json(Channel);
+format('proplist', Channel) -> to_props(Channel);
+format('record', Channel) -> Channel.
 
 -spec node(ne_binary()) ->
                   {'ok', atom()} |
@@ -171,51 +171,32 @@ to_json(Channel) ->
 
 -spec to_props(channel()) -> wh_proplist().
 to_props(Channel) ->
-    [{<<"uuid">>, Channel#channel.uuid}
-     ,{<<"destination">>, Channel#channel.destination}
-     ,{<<"direction">>, Channel#channel.direction}
-     ,{<<"account_id">>, Channel#channel.account_id}
-     ,{<<"account_billing">>, Channel#channel.account_billing}
-     ,{<<"authorizing_id">>, Channel#channel.authorizing_id}
-     ,{<<"authorizing_type">>, Channel#channel.authorizing_type}
-     ,{<<"owner_id">>, Channel#channel.owner_id}
-     ,{<<"resource_id">>, Channel#channel.resource_id}
-     ,{<<"presence_id">>, Channel#channel.presence_id}
-     ,{<<"fetch_id">>, Channel#channel.fetch_id}
-     ,{<<"bridge_id">>, Channel#channel.bridge_id}
-     ,{<<"precedence">>, Channel#channel.precedence}
-     ,{<<"reseller_id">>, Channel#channel.reseller_id}
-     ,{<<"reseller_billing">>, Channel#channel.reseller_billing}
-     ,{<<"realm">>, Channel#channel.realm}
-     ,{<<"username">>, Channel#channel.username}
-     ,{<<"answered">>, Channel#channel.answered}
-     ,{<<"node">>, Channel#channel.node}
-     ,{<<"timestamp">>, Channel#channel.timestamp}
-     ,{<<"profile">>, Channel#channel.profile}
-     ,{<<"context">>, Channel#channel.context}
-     ,{<<"dialplan">>, Channel#channel.dialplan}
-     ,{<<"other_leg">>, Channel#channel.other_leg}
-    ].
-
--spec handle_channel_status(wh_json:object(), wh_proplist()) -> 'ok'.
-handle_channel_status(JObj, _Props) ->
-    'true' = wapi_call:channel_status_req_v(JObj),
-    _ = wh_util:put_callid(JObj),
-    CallId = wh_json:get_value(<<"Call-ID">>, JObj),
-    lager:debug("channel status request received"),
-    case fetch(CallId) of
-        {'error', 'not_found'} ->
-            lager:debug("no node found with channel ~s", [CallId]),
-            Resp = [{<<"Call-ID">>, CallId}
-                    ,{<<"Status">>, <<"terminated">>}
-                    ,{<<"Error-Msg">>, <<"no node found with channel">>}
-                    ,{<<"Msg-ID">>, wh_json:get_value(<<"Msg-ID">>, JObj)}
-                    | wh_api:default_headers(?APP_NAME, ?APP_VERSION)
-                   ],
-            wapi_call:publish_channel_status_resp(wh_json:get_value(<<"Server-ID">>, JObj), Resp);
-        {'ok', Channel} ->
-            channel_status_resp(CallId, Channel, JObj)
-    end.
+    props:filter_undefined(
+      [{<<"uuid">>, Channel#channel.uuid}
+       ,{<<"destination">>, Channel#channel.destination}
+       ,{<<"direction">>, Channel#channel.direction}
+       ,{<<"account_id">>, Channel#channel.account_id}
+       ,{<<"account_billing">>, Channel#channel.account_billing}
+       ,{<<"authorizing_id">>, Channel#channel.authorizing_id}
+       ,{<<"authorizing_type">>, Channel#channel.authorizing_type}
+       ,{<<"owner_id">>, Channel#channel.owner_id}
+       ,{<<"resource_id">>, Channel#channel.resource_id}
+       ,{<<"presence_id">>, Channel#channel.presence_id}
+       ,{<<"fetch_id">>, Channel#channel.fetch_id}
+       ,{<<"bridge_id">>, Channel#channel.bridge_id}
+       ,{<<"precedence">>, Channel#channel.precedence}
+       ,{<<"reseller_id">>, Channel#channel.reseller_id}
+       ,{<<"reseller_billing">>, Channel#channel.reseller_billing}
+       ,{<<"realm">>, Channel#channel.realm}
+       ,{<<"username">>, Channel#channel.username}
+       ,{<<"answered">>, Channel#channel.answered}
+       ,{<<"node">>, Channel#channel.node}
+       ,{<<"timestamp">>, Channel#channel.timestamp}
+       ,{<<"profile">>, Channel#channel.profile}
+       ,{<<"context">>, Channel#channel.context}
+       ,{<<"dialplan">>, Channel#channel.dialplan}
+       ,{<<"other_leg">>, Channel#channel.other_leg}
+      ]).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -423,21 +404,6 @@ props_to_update(Props) ->
                             ,{#channel.context, props:get_value(<<"Caller-Context">>, Props)}
                             ,{#channel.dialplan, props:get_value(<<"Caller-Dialplan">>, Props)}
                            ]).
-
--spec channel_status_resp(ne_binary(), wh_json:object(), wh_json:object()) -> 'ok'.
-channel_status_resp(CallId, Channel, JObj) ->
-    Node = wh_json:get_binary_value(<<"node">>, Channel),
-    [_, Hostname] = binary:split(Node, <<"@">>),
-    lager:debug("channel is on ~s", [Hostname]),
-    Resp = [{<<"Call-ID">>, CallId}
-            ,{<<"Status">>, <<"active">>}
-            ,{<<"Switch-Hostname">>, Hostname}
-            ,{<<"Switch-Nodename">>, wh_util:to_binary(Node)}
-            ,{<<"Switch-URL">>, ecallmgr_fs_nodes:sip_url(Node)}
-            ,{<<"Msg-ID">>, wh_json:get_value(<<"Msg-ID">>, JObj)}
-            | wh_api:default_headers(?APP_NAME, ?APP_VERSION)
-           ],
-    wapi_call:publish_channel_status_resp(wh_json:get_value(<<"Server-ID">>, JObj), Resp).
 
 get_other_leg(UUID, Props) ->
     get_other_leg(UUID, Props, props:get_value(<<"Other-Leg-Unique-ID">>, Props)).

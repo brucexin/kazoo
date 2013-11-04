@@ -15,6 +15,7 @@
 -export([publish_resp/2, publish_resp/3]).
 -export([bind_q/2]).
 -export([unbind_q/1, unbind_q/2]).
+-export([declare_exchanges/0]).
 
 -include_lib("whistle/include/wh_api.hrl").
 
@@ -23,15 +24,19 @@
                                       ,<<"Application-Name">>
                                      ]).
 -define(OPTIONAL_OFFNET_RESOURCE_REQ_HEADERS
-        ,[<<"Timeout">>, <<"Ignore-Early-Media">>, <<"Flags">>, <<"Media">>
-          ,<<"Outbound-Caller-ID-Name">>, <<"Outbound-Caller-ID-Number">>
-          ,<<"Emergency-Caller-ID-Name">>, <<"Emergency-Caller-ID-Number">>
-          ,<<"Ringback">>, <<"SIP-Headers">>, <<"Custom-Channel-Vars">>
-          ,<<"Hold-Media">>, <<"Presence-ID">>, <<"Account-Realm">>
-          ,<<"Control-Queue">>, <<"Call-ID">>, <<"Application-Data">>
-          ,<<"Account-ID">>, <<"Outbound-Call-ID">>, <<"Force-Fax">>
-          ,<<"Call-ID">>, <<"Mode">>, <<"Group-ID">> % Eavesdrop
-          ,<<"Force-Outbound">>
+        ,[<<"Timeout">>
+              ,<<"Ignore-Early-Media">>, <<"Flags">>, <<"Media">>
+              ,<<"Outbound-Caller-ID-Name">>, <<"Outbound-Caller-ID-Number">>
+              ,<<"Emergency-Caller-ID-Name">>, <<"Emergency-Caller-ID-Number">>
+              ,<<"Ringback">>, <<"SIP-Headers">>, <<"Custom-Channel-Vars">>
+              ,<<"Hold-Media">>, <<"Presence-ID">>, <<"Account-Realm">>
+              ,<<"Control-Queue">>, <<"Call-ID">>, <<"Application-Data">>
+              ,<<"Account-ID">>, <<"Outbound-Call-ID">>, <<"Hunt-Account-ID">>
+              ,<<"Call-ID">>, <<"Mode">>, <<"Group-ID">> % Eavesdrop
+              ,<<"Force-Outbound">>, <<"Fax-Identity-Number">>, <<"Fax-Identity-Name">>
+              ,<<"Enable-T38-Fax">>, <<"Enable-T38-Fax-Request">>
+              ,<<"Enable-T38-Passthrough">>, <<"Force-Fax">>, <<"Enable-T38-Gateway">>
+              ,<<"Format-From-URI">>, <<"From-URI-Realm">>, <<"Bypass-E164">>
          ]).
 -define(OFFNET_RESOURCE_REQ_VALUES
         ,[{<<"Event-Category">>, <<"resource">>}
@@ -56,6 +61,7 @@
           ,{<<"Custom-Channel-Vars">>, fun wh_json:is_json_object/1}
           ,{<<"Flags">>, fun is_list/1}
           ,{<<"Force-Fax">>, fun wh_util:is_boolean/1}
+          ,{<<"Enable-T38-Gateway">>, fun is_binary/1}
           ,{<<"Force-Outbound">>, fun wh_util:is_boolean/1}
          ]).
 
@@ -116,7 +122,6 @@ resp_v(JObj) ->
 
 -spec bind_q(ne_binary(), proplist()) -> 'ok'.
 bind_q(Queue, _Props) ->
-    _ = amqp_util:resource_exchange(),
     amqp_util:bind_q_to_resource(Queue, ?KEY_OFFNET_RESOURCE_REQ).
 
 -spec unbind_q(ne_binary()) -> 'ok'.
@@ -125,6 +130,15 @@ unbind_q(Queue) ->
     amqp_util:unbind_q_from_resource(Queue, ?KEY_OFFNET_RESOURCE_REQ).
 unbind_q(Queue, _Props) ->
     amqp_util:unbind_q_from_resource(Queue, ?KEY_OFFNET_RESOURCE_REQ).
+
+%%--------------------------------------------------------------------
+%% @doc
+%% declare the exchanges used by this API
+%% @end
+%%--------------------------------------------------------------------
+-spec declare_exchanges() -> 'ok'.
+declare_exchanges() ->
+    amqp_util:resource_exchange().
 
 -spec publish_req(api_terms()) -> 'ok'.
 -spec publish_req(api_terms(), ne_binary()) -> 'ok'.

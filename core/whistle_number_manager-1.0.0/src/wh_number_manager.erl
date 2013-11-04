@@ -10,7 +10,7 @@
 %%%-------------------------------------------------------------------
 -module(wh_number_manager).
 
--export([find/1, find/2]).
+-export([find/1, find/2, find/3]).
 -export([lookup_account_by_number/1]).
 -export([ported/1]).
 -export([create_number/3, create_number/4]).
@@ -35,21 +35,31 @@
 %% @public
 %% @doc
 %% Query the various providers for available numbers.
+%% force leading +
 %% @end
 %%--------------------------------------------------------------------
 -spec find/1 :: (ne_binary()) -> [] | [ne_binary(),...].
 -spec find/2 :: (ne_binary(), ne_binary()) -> [] | [ne_binary(),...].
+-spec find/3 :: (ne_binary(), ne_binary(), wh_proplist()) -> [] | [ne_binary(),...].
 
 find(Number) ->
     find(Number, <<"1">>).
 
-find(Number, Quanity) ->
+find(Number, Quantity) ->
+    find(Number, Quantity, []).
+
+find(Number, Quantity, Opts) ->
+    AccountId = props:get_value(<<"Account-ID">>, Opts),
     Num = wnm_util:normalize_number(Number),
-    lager:debug("attempting to find ~p numbers with prefix '~s'", [Quanity, Number]),
-    Results = [{Module, catch(Module:find_numbers(Num, Quanity))}
+    lager:info("attempting to find ~p numbers with prefix '~s' for Account ~p", [Quantity, Number,AccountId]),
+    Results = [{Module, catch(Module:find_numbers(Num, Quantity, Opts))}
                || Module <- wnm_util:list_carrier_modules()
               ],
-    prepare_find_results(Results, []).
+    NewOpts = [{<<"classification">>, wnm_util:classify_number(Num)}
+               ,{<<"services">>, wh_services:fetch(AccountId)}
+               | Opts
+              ],
+    prepare_find_results(Results, [], NewOpts).
 
 %%--------------------------------------------------------------------
 %% @public
@@ -58,33 +68,49 @@ find(Number, Quanity) ->
 %% assignment
 %% @end
 %%--------------------------------------------------------------------
--spec lookup_account_by_number/1 :: (ne_binary()) -> {'ok', ne_binary(), wh_proplist()} |
+-spec lookup_account_by_number(ne_binary()) -> {'ok', ne_binary(), wh_proplist()} |
                                                      {'error', _}.
-lookup_account_by_number(undefined) ->
-    {error, not_reconcilable};
+lookup_account_by_number('undefined') ->
+   {'error', 'not_reconcilable'};
 lookup_account_by_number(Number) ->
     try wnm_number:get(Number) of
-        #number{assigned_to=undefined} ->
-            lager:debug("number ~s not assigned to an account", [Number]),
-            {error, unassigned};
-        #number{assigned_to=AssignedTo, state = <<"port_in">>}=N ->
-            lager:debug("number ~s is assigned to ~s in state port_in", [Number, AssignedTo]),
-            {ok, AssignedTo, number_options(N)};
-        #number{assigned_to=AssignedTo, state = <<"in_service">>}=N ->
-            lager:debug("number ~s is assigned to ~s in state in_service", [Number, AssignedTo]),
-            {ok, AssignedTo, number_options(N)};
-        #number{assigned_to=AssignedTo, state = <<"port_out">>}=N ->
-            lager:debug("number ~s is assigned to ~s in state port_in", [Number, AssignedTo]),
-            {ok, AssignedTo, number_options(N)};
-        #number{assigned_to=AssignedTo, state=State} ->
-            lager:debug("number ~s assigned to acccount id ~s but in state ~s", [Number, AssignedTo, State]),
-            {error, {not_in_service, AssignedTo}}
+        Number1 -> maybe_check_account(Number1)
     catch
-        throw:{Error, #number{}} ->
-            {error, Error}
+        'throw':{Error, #number{}} ->
+            {'error', Error}
     end.
 
-number_options(#number{state=State, features=Features, module_name=Module, number=Num}=Number) ->
+-spec maybe_check_account(ne_binary()) -> {'ok', ne_binary(), wh_proplist()} |
+                                          {'error', _}.
+maybe_check_account(#number{assigned_to='undefined'}=N) ->
+    lager:debug("number ~p not assigned to an account", [N]),
+    {'error', 'unassigned'};
+maybe_check_account(#number{assigned_to=AssignedTo, state = <<"port_in">>}=N) ->
+    lager:debug("number ~p is assigned to ~p in state port_in", [N, AssignedTo]),
+    check_account(N);
+maybe_check_account(#number{assigned_to=AssignedTo, state = <<"in_service">>}=N) ->
+    lager:debug("number ~p is assigned to ~p in state in_service", [N, AssignedTo]),
+    check_account(N);
+maybe_check_account(#number{assigned_to=AssignedTo, state = <<"port_out">>}=N) ->
+    lager:debug("number ~p is assigned to ~p in state port_in", [N, AssignedTo]),
+    check_account(N);
+maybe_check_account(#number{assigned_to=AssignedTo, state=State}=N) ->
+    lager:debug("number ~p assigned to acccount id ~p but in state ~p", [N, AssignedTo, State]),
+    {'error', {'not_in_service', AssignedTo}}.
+
+-spec check_account(ne_binary()) -> {'ok', ne_binary(), wh_proplist()} |
+                                    {'error', _}.
+check_account(#number{assigned_to=AssignedTo}=N) ->
+    case wh_util:is_account_enabled(AssignedTo) of
+        'false' -> {'error', {'account_disabled', AssignedTo}};
+        'true' -> {'ok', AssignedTo, number_options(N)}
+    end.
+
+number_options(#number{state=State
+                       ,features=Features
+                       ,module_name=Module
+                       ,number=Num
+                       ,assigned_to=AssignedTo}=Number) ->
     [{'force_outbound', should_force_outbound(Number)}
      ,{'pending_port', State =:= <<"port_in">>}
      ,{'local', Module =:= 'wnm_local'}
@@ -92,6 +118,7 @@ number_options(#number{state=State, features=Features, module_name=Module, numbe
      ,{'ringback_media', find_early_ringback(Number)}
      ,{'transfer_media', find_transfer_ringback(Number)}
      ,{'number', Num }
+     ,{'account_id', AssignedTo}
     ].
 
 should_force_outbound(#number{module_name=wnm_local}) -> true;
@@ -144,7 +171,7 @@ ported(Number) ->
 %% @end
 %%--------------------------------------------------------------------
 -spec create_number/3 :: (ne_binary(), ne_binary(), ne_binary()) -> operation_return().
--spec create_number/4 :: (ne_binary(), ne_binary(), ne_binary(), wh_json:json_object()) -> operation_return().
+-spec create_number/4 :: (ne_binary(), ne_binary(), ne_binary(), wh_json:object()) -> operation_return().
 
 create_number(Number, AssignTo, AuthBy) ->
     create_number(Number, AssignTo, AuthBy, wh_json:new()).
@@ -152,12 +179,12 @@ create_number(Number, AssignTo, AuthBy) ->
 create_number(Number, AssignTo, AuthBy, PublicFields) ->
     lager:debug("attempting to create number ~s for account ~s", [Number, AssignTo]),
     Routines = [fun(_) -> wnm_number:get(Number, PublicFields) end
-                ,fun({not_found, #number{}=N}) ->
-                         AccountId = wh_util:format_account_id(AuthBy, raw),
-                         AccountDb = wh_util:format_account_id(AuthBy, encoded),
+                ,fun({'not_found', #number{}=N}) ->
+                         AccountId = wh_util:format_account_id(AuthBy, 'raw'),
+                         AccountDb = wh_util:format_account_id(AuthBy, 'encoded'),
                          try
-                             {ok, JObj} = couch_mgr:open_cache_doc(AccountDb, AccountId),
-                             true = wh_json:is_true(<<"pvt_wnm_allow_additions">>, JObj),
+                             {'ok', JObj} = couch_mgr:open_cache_doc(AccountDb, AccountId),
+                             'true' = wh_json:is_true(<<"pvt_wnm_allow_additions">>, JObj),
                              lager:debug("number doesnt exist but account ~s is authorized to create it", [AuthBy]),
                              NewNumber = N#number{number=Number
                                                   ,assign_to=AssignTo
@@ -166,7 +193,7 @@ create_number(Number, AssignTo, AuthBy, PublicFields) ->
                                                  },
                              wnm_number:create_available(NewNumber)
                          catch
-                             error:{badmatch, Error} ->
+                             'error':{'badmatch', Error} ->
                                  lager:debug("account is not authorized to create a new number: ~p", [Error]),
                                  wnm_number:error_unauthorized(N)
                          end;
@@ -202,7 +229,7 @@ create_number(Number, AssignTo, AuthBy, PublicFields) ->
 %% @end
 %%--------------------------------------------------------------------
 -spec port_in/3 :: (ne_binary(), ne_binary(), ne_binary()) -> operation_return().
--spec port_in/4 :: (ne_binary(), ne_binary(), ne_binary(), wh_json:json_object()) -> operation_return().
+-spec port_in/4 :: (ne_binary(), ne_binary(), ne_binary(), wh_json:object()) -> operation_return().
 
 port_in(Number, AssignTo, AuthBy) ->
     port_in(Number, AssignTo, AuthBy, wh_json:new()).
@@ -314,7 +341,7 @@ free_numbers(AccountId) ->
 %% @end
 %%--------------------------------------------------------------------
 -spec reserve_number/3 :: (ne_binary(), ne_binary(), ne_binary()) -> operation_return().
--spec reserve_number/4 :: (ne_binary(), ne_binary(), ne_binary(), wh_json:json_object() | 'undefined')
+-spec reserve_number/4 :: (ne_binary(), ne_binary(), ne_binary(), wh_json:object() | 'undefined')
                           -> operation_return().
 
 reserve_number(Number, AssignTo, AuthBy) ->
@@ -346,7 +373,7 @@ reserve_number(Number, AssignTo, AuthBy, PublicFields) ->
 %% @end
 %%--------------------------------------------------------------------
 -spec assign_number_to_account/3 :: (ne_binary(), ne_binary(), ne_binary()) -> operation_return().
--spec assign_number_to_account/4 :: (ne_binary(), ne_binary(), ne_binary(), wh_json:json_object() | 'undefined')
+-spec assign_number_to_account/4 :: (ne_binary(), ne_binary(), ne_binary(), wh_json:object() | 'undefined')
                                     -> operation_return().
 
 assign_number_to_account(Number, AssignTo, AuthBy) ->
@@ -355,8 +382,18 @@ assign_number_to_account(Number, AssignTo, AuthBy) ->
 assign_number_to_account(Number, AssignTo, AuthBy, PublicFields) ->
     lager:debug("attempting to assign ~s to account ~s", [Number, AssignTo]),
     Routines = [fun(_) -> wnm_number:get(Number, PublicFields) end
-                ,fun({_, #number{}}=E) -> E;
-                    (#number{}=N) -> wnm_number:in_service(N#number{assign_to=AssignTo, auth_by=AuthBy})
+                ,fun({'not_found', _}) ->
+                        NewNumber = #number{number=Number
+                                             ,module_name='wnm_other'
+                                             ,module_data=wh_json:new()
+                                             ,number_doc=wh_json:public_fields(PublicFields)
+                                },
+                        wnm_number:create_discovery(NewNumber);
+                    ({_, #number{}}=E) -> E;
+                    (#number{}=N) -> N
+                 end
+                ,fun ({_, #number{}}=E) -> E;
+                     (#number{}=N) -> wnm_number:in_service(N#number{assign_to=AssignTo, auth_by=AuthBy})
                  end
                 ,fun({_, #number{}}=E) -> E;
                     (#number{}=N) -> wnm_number:save(N)
@@ -563,7 +600,7 @@ get_public_fields(Number, AuthBy) ->
 %% Update the user configurable fields
 %% @end
 %%--------------------------------------------------------------------
--spec set_public_fields/3 :: (ne_binary(), wh_json:json_object(), ne_binary()) -> operation_return().
+-spec set_public_fields/3 :: (ne_binary(), wh_json:object(), ne_binary()) -> operation_return().
 set_public_fields(Number, PublicFields, AuthBy) ->
     Routines = [fun({_, #number{}}=E) -> E;
                    (#number{assigned_to=AssignedTo}=N) ->
@@ -621,50 +658,62 @@ track_assignment(Numbers, Assignment) ->
 %% ensure the modules data is stored for later acquisition.
 %% @end
 %%--------------------------------------------------------------------
--spec prepare_find_results/2 :: (wh_proplist(), [] | [wh_json:json_strings(),...]) -> wh_json:json_strings().
--spec prepare_find_results/4 :: (wh_json:json_strings(), atom(), wh_json:json_object(), wh_json:json_strings())
+-spec prepare_find_results/3 :: (wh_proplist(), [], wh_proplist() | [wh_json:json_strings(),...]) -> wh_json:json_strings().
+-spec prepare_find_results/5 :: (wh_json:json_strings(), atom(), wh_json:object(), wh_json:json_strings(), wh_proplist())
                                 -> wh_json:json_strings().
 
-prepare_find_results([], Found) ->
-    Results = lists:flatten(Found),
-    lager:debug("discovered ~p available numbers", [length(Results)]),
-    Results;
-prepare_find_results([{Module, {ok, ModuleResults}}|T], Found) ->
-    case wh_json:get_keys(ModuleResults) of
-        [] -> prepare_find_results(T, Found);
-        Numbers ->
-            Results = prepare_find_results(Numbers, Module
-                                           ,ModuleResults, Found),
-            prepare_find_results(T, [Results|Found])
-    end;
-prepare_find_results([_|T], Found) ->
-    prepare_find_results(T, Found).
-
-prepare_find_results([], _, _, Found) ->
+prepare_find_results([], Found, _) ->
     Found;
-prepare_find_results([Number|Numbers], ModuleName, ModuleResults, Found) ->
+prepare_find_results([{'wnm_other', {'ok', ModuleResults}}|T], Found, Opts) ->
+    prepare_find_results(T, ModuleResults++Found, Opts);
+prepare_find_results([{Module, {'ok', ModuleResults}}|T], Found, Opts) ->
+    case wh_json:get_keys(ModuleResults) of
+        [] -> prepare_find_results(T, Found, Opts);
+        Numbers ->
+            Results = prepare_find_results(Numbers, Module,ModuleResults, Found, Opts),
+            prepare_find_results(T, Results, Opts)
+    end;
+prepare_find_results([_|T], Found, Opts) ->
+    prepare_find_results(T, Found, Opts).
+
+prepare_find_results([], _, _, Found,_) ->
+    Found;
+prepare_find_results([Number|Numbers], ModuleName, ModuleResults, Found, Opts) ->
+	Props = wh_json:get_value(Number, ModuleResults),
+    Routines = [fun(A) ->
+					case wh_services:activation_charges(<<"phone_numbers">>
+                                                        ,props:get_value(<<"classification">>, Opts)
+                                                        ,props:get_value(<<"services">>, Opts))
+                    of
+                        'undefined' -> A;
+                        Value -> props:set_value(<<"activation_charge">>, Value, A)
+                    end
+                end
+               ],
+    PropsUpdated = lists:foldl(fun(F, J) -> F(J) end, Props, Routines),
+    Result = [wh_json:from_list(PropsUpdated)|Found],
     case catch wnm_number:get(Number) of
         #number{state=State} ->
             case lists:member(State, ?WNM_AVALIABLE_STATES) of
-                true ->
-                    prepare_find_results(Numbers, ModuleName, ModuleResults, [Number|Found]);
-                false ->
+                'true' ->
+                    prepare_find_results(Numbers, ModuleName, ModuleResults, Result, Opts);
+                'false' ->
                     lager:debug("the discovery '~s' is not available: ~s", [Number, State]),
-                    prepare_find_results(Numbers, ModuleName, ModuleResults, Found)
+                    prepare_find_results(Numbers, ModuleName, ModuleResults, Found, Opts)
             end;
-        {not_found, #number{}=N} ->
+        {'not_found', #number{}=N} ->
             NewNumber = N#number{number=Number
                                  ,module_name = ModuleName
-                                 ,module_data=wh_json:get_value(Number, ModuleResults)
+                                 ,module_data=wh_json:from_list(wh_json:get_value(Number, ModuleResults))
                                 },
             case catch wnm_number:save(wnm_number:create_discovery(NewNumber)) of
                 #number{} ->
-                    prepare_find_results(Numbers, ModuleName, ModuleResults, [Number|Found]);
+                    prepare_find_results(Numbers, ModuleName, ModuleResults, Result, Opts);
                 {_R, #number{}} ->
                     lager:debug("failed to store discovery ~s: ~p", [Number, _R]),
-                    prepare_find_results(Numbers, ModuleName, ModuleResults, Found)
+                    prepare_find_results(Numbers, ModuleName, ModuleResults, Found, Opts)
             end;
         {_R, #number{}} ->
             lager:debug("failed to determine state of discovery ~s: ~p", [Number, _R]),
-            prepare_find_results(Numbers, ModuleName, ModuleResults, Found)
+            prepare_find_results(Numbers, ModuleName, ModuleResults, Found, Opts)
     end.

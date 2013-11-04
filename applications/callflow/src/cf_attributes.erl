@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%%% @copyright (C) 2011-2012, VoIP INC
+%%% @copyright (C) 2011-2013, 2600Hz INC
 %%% @doc
 %%% @end
 %%% @contributors
@@ -12,7 +12,7 @@
 
 -export([valid_emergency_numbers/1]).
 -export([temporal_rules/1]).
--export([groups/1]).
+-export([groups/1, groups/2]).
 -export([caller_id/2]).
 -export([callee_id/2]).
 -export([moh_attributes/2, moh_attributes/3]).
@@ -33,7 +33,9 @@ temporal_rules(Call) ->
     AccountDb = whapps_call:account_db(Call),
     case couch_mgr:get_results(AccountDb, <<"cf_attributes/temporal_rules">>, ['include_docs']) of
         {'ok', JObjs} -> JObjs;
-        {'error', _} -> []
+        {'error', _E} ->
+            lager:debug("failed to find temporal rules: ~p", [_E]),
+            []
     end.
 
 %%-----------------------------------------------------------------------------
@@ -42,13 +44,16 @@ temporal_rules(Call) ->
 %% @end
 %%-----------------------------------------------------------------------------
 -spec groups(whapps_call:call()) -> wh_json:objects().
+-spec groups(whapps_call:call(), wh_proplist()) -> wh_json:objects().
 groups(Call) ->
+    groups(Call, []).
+groups(Call, ViewOptions) ->
     AccountDb = whapps_call:account_db(Call),
-    ViewOptions = [],
     case couch_mgr:get_results(AccountDb, <<"cf_attributes/groups">>, ViewOptions) of
-        {'ok', JObj} -> JObj;
-        {'error', _} -> wh_json:new()
+        {'ok', JObjs} -> JObjs;
+        {'error', _} -> []
     end.
+
 %%-----------------------------------------------------------------------------
 %% @public
 %% @doc
@@ -103,7 +108,7 @@ maybe_normalize_cid(Number, 'undefined', Validate, Attribute, Call) ->
 maybe_normalize_cid(Number, Name, Validate, Attribute, Call) ->
     maybe_prefix_cid_number(wh_util:to_binary(Number), Name, Validate, Attribute, Call).
 
--spec maybe_prefix_cid_number(api_binary(), ne_binary(), boolean(), ne_binary(), whapps_call:call()) ->
+-spec maybe_prefix_cid_number(ne_binary(), ne_binary(), boolean(), ne_binary(), whapps_call:call()) ->
                                      {api_binary(), api_binary()}.
 maybe_prefix_cid_number(Number, Name, Validate, Attribute, Call) ->
     case whapps_call:kvs_fetch('prepend_cid_number', Call) of
@@ -113,7 +118,7 @@ maybe_prefix_cid_number(Number, Name, Validate, Attribute, Call) ->
             maybe_prefix_cid_name(Prefixed, Name, Validate, Attribute, Call)
     end.
 
--spec maybe_prefix_cid_name(api_binary(), ne_binary(), boolean(), ne_binary(), whapps_call:call()) ->
+-spec maybe_prefix_cid_name(ne_binary(), ne_binary(), boolean(), ne_binary(), whapps_call:call()) ->
                                    {api_binary(), api_binary()}.
 maybe_prefix_cid_name(Number, Name, Validate, Attribute, Call) ->
     case whapps_call:kvs_fetch('prepend_cid_name', Call) of
@@ -123,7 +128,7 @@ maybe_prefix_cid_name(Number, Name, Validate, Attribute, Call) ->
             maybe_ensure_cid_valid(Number, Prefixed, Validate, Attribute, Call)
     end.
 
--spec maybe_ensure_cid_valid(api_binary(), ne_binary(), boolean(), ne_binary(), whapps_call:call()) ->
+-spec maybe_ensure_cid_valid(ne_binary(), ne_binary(), boolean(), ne_binary(), whapps_call:call()) ->
                                     {api_binary(), api_binary()}.
 maybe_ensure_cid_valid(Number, Name, 'true', <<"external">>, Call) ->
     case whapps_config:get_is_true(<<"callflow">>, <<"ensure_valid_caller_id">>, 'false') of
@@ -136,23 +141,20 @@ maybe_ensure_cid_valid(Number, Name, 'true', <<"emergency">>, Call) ->
     case whapps_config:get_is_true(<<"callflow">>, <<"ensure_valid_emergency_number">>, 'false') of
         'true' -> ensure_valid_emergency_number(Number, Name, Call);
         'false' ->
-            lager:info("emergecy caller id <~s> ~s", [Name, Number]),
+            lager:info("emergency caller id <~s> ~s", [Name, Number]),
             {Number, Name}
     end;
 maybe_ensure_cid_valid(Number, Name, _, Attribute, _) ->
     lager:info("~s caller id <~s> ~s", [Attribute, Name, Number]),
     {Number, Name}.
 
--spec ensure_valid_emergency_number(api_binary(), api_binary(), whapps_call:call()) ->
+-spec ensure_valid_emergency_number(ne_binary(), api_binary(), whapps_call:call()) ->
                                            {api_binary(), api_binary()}.
-ensure_valid_emergency_number('undefined', Name, Call) ->
-    Numbers = valid_emergency_numbers(Call),
-    find_valid_emergency_number(Numbers, 'undefined', Name);
 ensure_valid_emergency_number(Number, Name, Call) ->
     Numbers = valid_emergency_numbers(Call),
     case lists:member(Number, Numbers) of
         'true' ->
-            lager:info("emergecy caller id <~s> ~s", [Name, Number]),
+            lager:info("emergency caller id <~s> ~s", [Name, Number]),
             {Number, Name};
         'false' ->
             find_valid_emergency_number(Numbers, Number, Name)
@@ -163,14 +165,14 @@ ensure_valid_emergency_number(Number, Name, Call) ->
 find_valid_emergency_number([], Number, Name) ->
     case whapps_config:get_non_empty(<<"callflow">>, <<"default_emergency_number">>, <<>>) of
         'undefined' ->
-            lager:info("emergecy caller id <~s> ~s", [Name, Number]),
+            lager:info("emergency caller id <~s> ~s", [Name, Number]),
             {Number, Name};
         Default ->
-            lager:info("emergecy caller id <~s> ~s", [Name, Default]),
+            lager:info("emergency caller id <~s> ~s", [Name, Default]),
             {Default, Name}
     end;
 find_valid_emergency_number([Number|_], _, Name) ->
-    lager:info("emergecy caller id <~s> ~s", [Name, Number]),
+    lager:info("emergency caller id <~s> ~s", [Name, Number]),
     {Number, Name}.
 
 -spec ensure_valid_caller_id(ne_binary(), ne_binary(), whapps_call:call()) ->
@@ -312,6 +314,7 @@ moh_attributes(Attribute, Call) ->
             maybe_normalize_moh_attribute(Value, Attribute, Call)
     end.
 
+moh_attributes('undefined', _, _) -> 'undefined';
 moh_attributes(EndpointId, Attribute, Call) when is_binary(EndpointId) ->
     case cf_endpoint:get(EndpointId, Call) of
         {'error', _} -> 'undefined';

@@ -9,9 +9,10 @@
 %%%-------------------------------------------------------------------
 -module(wnm_local).
 
--export([find_numbers/2]).
+-export([find_numbers/3]).
 -export([acquire_number/1]).
 -export([disconnect_number/1]).
+-export([is_number_billable/1]).
 
 -include("../wnm.hrl").
 
@@ -22,14 +23,18 @@
 %% in a rate center
 %% @end
 %%--------------------------------------------------------------------
--spec find_numbers/2 :: (ne_binary(), pos_integer()) -> %{'ok', wh_json:json_object()} |
+-spec find_numbers/3 :: (ne_binary(), pos_integer(), wh_proplist()) -> %{'ok', wh_json:object()} |
                                                         {'error', 'non_available'}.
-find_numbers(Number, Quanity) when size(Number) < 5 ->
-    find_numbers(<<"+1", Number/binary>>, Quanity);
-find_numbers(_Number, _Quanity) ->
+find_numbers(Number, Quanity, Opts) when size(Number) < 5 ->
+    find_numbers(<<"+1", Number/binary>>, Quanity, Opts);
+find_numbers(_Number, _Quanity, _Opts) ->
     %% TODO: given the requestors account number discovery wnm_local numbers that are
     %%       available but managed by accendants of the account.
-    {error, non_available}.
+    {'error', 'non_available'}.
+
+
+-spec is_number_billable/1 :: (wnm_number()) -> 'true' | 'false'.
+is_number_billable(_Number) -> 'false'.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -47,4 +52,5 @@ acquire_number(Number) -> Number.
 %% @end
 %%--------------------------------------------------------------------
 -spec disconnect_number/1 :: (wnm_number()) -> wnm_number().
-disconnect_number(Number) -> Number.
+disconnect_number(Number) -> 
+	Number#number{state = <<"released">>, hard_delete='true'}.

@@ -8,9 +8,10 @@
 %%%-------------------------------------------------------------------
 -module(wnm_pacwest).
 
--export([find_numbers/2]).
+-export([find_numbers/3]).
 -export([acquire_number/1]).
 -export([disconnect_number/1]).
+-export([is_number_billable/1]).
 
 -include("../wnm.hrl").
 
@@ -21,9 +22,13 @@
 %% in a rate center
 %% @end
 %%--------------------------------------------------------------------
--spec find_numbers/2 :: (ne_binary(), pos_integer()) -> {'error', _}.
-find_numbers(_Number, _Quanity) ->
+-spec find_numbers/3 :: (ne_binary(), pos_integer(), wh_proplist()) -> {'error', _}.
+find_numbers(_Number, _Quanity, _Opts) ->
     {error, non_available}.
+
+
+-spec is_number_billable/1 :: (wnm_number()) -> 'true' | 'false'.
+is_number_billable(_Number) -> 'true'.
 
 %%--------------------------------------------------------------------
 %% @public

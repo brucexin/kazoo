@@ -1,18 +1,74 @@
 %%%-------------------------------------------------------------------
-%%% @copyright (C) 2011-2012, VoIP INC
+%%% @copyright (C) 2011-2013, 2600Hz INC
 %%% @doc
 %%%
 %%% @end
 %%%-------------------------------------------------------------------
 -module(stepswitch_util).
 
+-export([get_realm/1]).
+-export([get_inbound_destination/1]).
+-export([get_outbound_destination/1]).
 -export([lookup_number/1]).
--export([maybe_gateway_by_address/2]).
--export([evaluate_number/2]).
--export([evaluate_flags/2]).
--export([get_dialstring/2]).
+-export([correct_shortdial/2]).
 
 -include("stepswitch.hrl").
+
+%%--------------------------------------------------------------------
+%% @public
+%% @doc
+%%
+%% @end
+%%--------------------------------------------------------------------
+-spec get_realm(api_binary() | wh_json:object()) -> api_binary().
+get_realm('undefined') -> 'undefined';
+get_realm(From) when is_binary(From) ->
+    case binary:split(From, <<"@">>) of
+        [_, Realm] -> Realm;
+        _Else -> 'undefined'
+    end;
+get_realm(JObj) ->
+    AuthRealm = wh_json:get_value(<<"Auth-Realm">>, JObj),
+    case wh_util:is_empty(AuthRealm)
+        orelse wh_network_utils:is_ipv4(AuthRealm) 
+        orelse wh_network_utils:is_ipv6(AuthRealm) 
+    of
+        'false' -> AuthRealm;
+        'true' ->
+            get_realm(wh_json:get_value(<<"From">>, JObj))
+    end.
+
+%%--------------------------------------------------------------------
+%% @public
+%% @doc
+%% 
+%% @end
+%%--------------------------------------------------------------------
+-spec get_inbound_destination(wh_json:object()) -> ne_binary().
+get_inbound_destination(JObj) ->
+    {Number, _} = whapps_util:get_destination(JObj, ?APP_NAME, <<"inbound_user_field">>),
+    case whapps_config:get_is_true(<<"stepswitch">>, <<"assume_inbound_e164">>, 'false') of
+        'true' -> assume_e164(Number);
+        'false' -> wnm_util:to_e164(Number)
+    end.
+
+-spec assume_e164(ne_binary()) -> ne_binary().
+assume_e164(<<$+, _/binary>> = Number) -> Number;
+assume_e164(Number) -> <<$+, Number/binary>>.
+
+%%--------------------------------------------------------------------
+%% @public
+%% @doc
+%% 
+%% @end
+%%--------------------------------------------------------------------
+-spec get_outbound_destination(wh_json:object()) -> ne_binary().
+get_outbound_destination(JObj) ->
+    {Number, _} = whapps_util:get_destination(JObj, ?APP_NAME, <<"outbound_user_field">>),
+     case wh_json:is_true(<<"Bypass-E164">>, JObj) of
+         'false' -> wnm_util:to_e164(Number);
+         'true' -> Number
+     end.
 
 %%--------------------------------------------------------------------
 %% @public
@@ -26,7 +82,9 @@
 lookup_number(Number) ->
     Num = wnm_util:normalize_number(Number),
     case wh_cache:fetch_local(?STEPSWITCH_CACHE, cache_key_number(Num)) of
-        {'ok', {AccountId, Props}} -> {'ok', AccountId, Props};
+        {'ok', {AccountId, Props}} -> 
+            lager:debug("found number properties in stepswitch cache"),
+            {'ok', AccountId, Props};
         {'error', 'not_found'} -> fetch_number(Num)
     end.
 
@@ -36,7 +94,6 @@ lookup_number(Number) ->
 fetch_number(Num) ->
     case wh_number_manager:lookup_account_by_number(Num) of
         {'ok', AccountId, Props} ->
-            _ = maybe_transition_port_in(Num, Props),
             CacheProps = [{'origin', {'db', wnm_util:number_to_db_name(Num), Num}}],
             wh_cache:store_local(?STEPSWITCH_CACHE, cache_key_number(Num), {AccountId, Props}, CacheProps),
             lager:debug("~s is associated with account ~s", [Num, AccountId]),
@@ -46,155 +103,32 @@ fetch_number(Num) ->
             E
     end.
 
--spec maybe_transition_port_in(ne_binary(), proplist()) -> 'false' | pid().
-maybe_transition_port_in(Num, Props) ->
-    case props:get_value('pending_port', Props) of
-        'false' -> 'false';
-        'true' -> spawn('wh_number_manager', 'ported', [Num])
-    end.
-
-%%--------------------------------------------------------------------
-%% @public
-%% @doc
-%% 
-%% @end
-%%--------------------------------------------------------------------
--spec maybe_gateway_by_address(ne_binary(), #resrc{}|[#gateway{},...]|[]) -> 'undefined' | #gateway{}.
-maybe_gateway_by_address(_, []) -> 'undefined';
-maybe_gateway_by_address(Address, [#resrc{gateways=Gateways}|Resources]) ->
-    case maybe_gateway_by_address(Address, Gateways) of
-        'undefined' -> maybe_gateway_by_address(Address, Resources);
-        Gateway -> Gateway
-    end;
-maybe_gateway_by_address(Address, [#gateway{server=Address}=Gateway|_]) ->
-    Gateway;
-maybe_gateway_by_address(Address, [_G|Gateways]) ->
-    maybe_gateway_by_address(Address, Gateways).
-
-%%--------------------------------------------------------------------
-%% @public
-%% @doc
-%% Filter the list of resources returning only those with a rule that
-%% matches the number.  The list is of tuples with three elements,
-%% the weight, the captured component of the number, and the gateways.
-%% @end
-%%--------------------------------------------------------------------
--spec evaluate_number(ne_binary(), [#resrc{}]) -> endpoints().
-evaluate_number(Number, Resrcs) ->
-    sort_endpoints(get_endpoints(Number, Resrcs)).
-
-%%--------------------------------------------------------------------
-%% @public
-%% @doc
-%% Filter the list of resources returning only those that have every
-%% flag provided
-%% @end
-%%--------------------------------------------------------------------
--spec evaluate_flags(list(), [#resrc{}]) -> [#resrc{}].
-evaluate_flags(F1, Resrcs) ->
-    [Resrc
-     || #resrc{flags=F2}=Resrc <- Resrcs,
-        lists:all(fun(Flag) -> 
-                          wh_util:is_empty(Flag)
-                              orelse lists:member(Flag, F2)
-                  end, F1)
-    ].
-
-%%--------------------------------------------------------------------
-%% @public
-%% @doc
-%% Build the sip url of a resource gateway
-%% @end
-%%--------------------------------------------------------------------
--spec get_dialstring(#gateway{}, ne_binary()) -> ne_binary().
-get_dialstring(#gateway{route='undefined'
-                        ,prefix=Prefix
-                        ,suffix=Suffix
-                        ,server=Server
-                       }, Number) ->
-    list_to_binary(["sip:"
-                    ,wh_util:to_binary(Prefix)
-                    ,Number
-                    ,wh_util:to_binary(Suffix)
-                    ,"@"
-                    ,wh_util:to_binary(Server)
-                   ]);
-get_dialstring(#gateway{route=Route}, _) ->
-    Route.
-
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Sort the gateway tuples returned by evalutate_resrcs according to
-%% weight.
-%% @end
-%%--------------------------------------------------------------------
--spec sort_endpoints(endpoints()) -> endpoints().
-sort_endpoints(Endpoints) ->
-    lists:sort(fun({W1, _, _, _, _}, {W2, _, _, _, _}) ->
-                       W1 =< W2
-               end, Endpoints).
-
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% @end
-%%--------------------------------------------------------------------
--spec get_endpoints(ne_binary(), [#resrc{}]) -> endpoints().
-get_endpoints(Number, Resrcs) ->
-    EPs = [get_endpoint(Number, R) || R <- Resrcs],
-    [Endpoint || Endpoint <- EPs, Endpoint =/= 'no_match'].
-
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Given a gateway JSON object it builds a gateway record
-%% @end
-%%--------------------------------------------------------------------
--spec get_endpoint(ne_binary(), #resrc{}) -> endpoint() | 'no_match'.
-get_endpoint(Number, #resrc{weight_cost=WC
-                            ,gateways=Gtws
-                            ,rules=Rules
-                            ,grace_period=GP
-                            ,is_emergency=IsEmergency
-                           }) ->
-    case evaluate_rules(Rules, Number) of
-        {'ok', DestNum} -> {WC, GP, DestNum, Gtws, IsEmergency};
-        {'error', 'no_match'} -> 'no_match'
-    end.
-
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% This function loops over rules (regex) and until one matches
-%% the destination number.  If the matching rule has a
-%% capture group return the largest group, otherwise return the whole
-%% number.  In the event that no rules match then return an error.
-%% @end
-%%--------------------------------------------------------------------
--spec evaluate_rules(re:mp(), ne_binary()) ->
-                            {'ok', ne_binary()} |
-                            {'error', 'no_match'}.
-evaluate_rules([], _) -> {'error', 'no_match'};
-evaluate_rules([Regex|T], Number) ->
-    case re:run(Number, Regex) of
-        {'match', [{Start,End}]} ->
-            {'ok', binary:part(Number, Start, End)};
-        {'match', CaptureGroups} ->
-            %% find the largest matching group if present by sorting the position of the
-            %% matching groups by list, reverse so head is largest, then take the head of the list
-            {Start, End} = hd(lists:reverse(lists:keysort(2, tl(CaptureGroups)))),
-            {'ok', binary:part(Number, Start, End)};
-        _ ->
-            evaluate_rules(T, Number)
-    end.
-
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% 
-%% @end
-%%--------------------------------------------------------------------
 -spec cache_key_number(ne_binary()) -> {'stepswitch_number', ne_binary()}.
 cache_key_number(Number) ->
     {'stepswitch_number', Number}.
+
+%%--------------------------------------------------------------------
+%% @public
+%% @doc
+%% if the given number is shorter then a known caller id then try
+%% to pad the front of the dialed number with values from the
+%% callerid.
+%% @end
+%%--------------------------------------------------------------------
+-spec correct_shortdial(ne_binary(), wh_json:object()) -> ne_binary() | 'undefined'.
+correct_shortdial(Number, JObj) ->
+    CIDNum = wh_json:get_first_defined([<<"Outbound-Caller-ID-Number">>
+                                        ,<<"Emergency-Caller-ID-Number">>
+                                       ], JObj),
+    MaxCorrection = whapps_config:get_integer(<<"stepswitch">>, <<"max_shortdial_correction">>, 5),
+    case is_binary(CIDNum) andalso (size(CIDNum) - size(Number)) of
+        Length when Length =< MaxCorrection, Length > 0 ->
+            CorrectedNumber = wnm_util:to_e164(<<(binary:part(CIDNum, 0, Length))/binary, Number/binary>>),
+            lager:debug("corrected shortdial ~s via CID ~s to ~s"
+                        ,[Number, CIDNum, CorrectedNumber]),
+            CorrectedNumber;
+        _ ->
+            lager:debug("unable to correct shortdial ~s via CID ~s"
+                        ,[Number, CIDNum]),
+            'undefined'
+    end.

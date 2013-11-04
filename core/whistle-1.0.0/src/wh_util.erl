@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%%% @copyright (C) 2010-2012, VoIP INC
+%%% @copyright (C) 2010-2013, 2600Hz INC
 %%% @doc
 %%% Various utilities - a veritable cornicopia
 %%% @end
@@ -10,7 +10,10 @@
 -module(wh_util).
 
 -export([log_stacktrace/0, log_stacktrace/1]).
--export([format_account_id/1, format_account_id/2]).
+-export([format_account_id/1
+         ,format_account_id/2
+         ,format_account_id/3
+        ]).
 -export([is_in_account_hierarchy/2, is_in_account_hierarchy/3]).
 -export([is_system_admin/1]).
 -export([get_account_realm/1, get_account_realm/2]).
@@ -40,6 +43,8 @@
 -export([uri_encode/1
          ,uri_decode/1
         ]).
+
+-export([pad_month/1]).
 
 -export([binary_md5/1]).
 -export([pad_binary/3, join_binary/1, join_binary/2]).
@@ -142,11 +147,15 @@ change_syslog_log_level(L) ->
 %% @end
 %%--------------------------------------------------------------------
 -type account_format() :: 'unencoded' | 'encoded' | 'raw'.
--spec format_account_id(ne_binaries() | ne_binary() | wh_json:object()) -> binary().
--spec format_account_id(ne_binaries() | ne_binary() | wh_json:object(), account_format()) -> binary().
+-spec format_account_id(ne_binaries() | ne_binary() | wh_json:object()) -> ne_binary().
+-spec format_account_id(ne_binaries() | ne_binary() | wh_json:object(), account_format()) -> ne_binary().
+-spec format_account_id(ne_binaries(), pos_integer(), pos_integer()) -> ne_binary().
 
 format_account_id(Doc) -> format_account_id(Doc, 'unencoded').
 
+format_account_id(DbName, Timestamp) when is_integer(Timestamp) andalso Timestamp > 0 ->
+    {{Year, Month, _}, _} = calendar:gregorian_seconds_to_datetime(Timestamp),
+    format_account_id(DbName, Year, Month);
 format_account_id(<<"accounts">>, _) -> <<"accounts">>;
 %% unencode the account db name
 format_account_id(<<"account/", _/binary>> = DbName, 'unencoded') ->
@@ -175,12 +184,24 @@ format_account_id(Account, Encoding) when not is_binary(Account) ->
     end;
 
 format_account_id(AccountId, 'unencoded') ->
-    [Id1, Id2, Id3, Id4 | IdRest] = wh_util:to_list(AccountId),
-    wh_util:to_binary(["account/", Id1, Id2, $/, Id3, Id4, $/, IdRest]);
+    [Id1, Id2, Id3, Id4 | IdRest] = to_list(AccountId),
+    to_binary(["account/", Id1, Id2, $/, Id3, Id4, $/, IdRest]);
 format_account_id(AccountId, 'encoded') when is_binary(AccountId) ->
-    [Id1, Id2, Id3, Id4 | IdRest] = wh_util:to_list(AccountId),
-    wh_util:to_binary(["account%2F", Id1, Id2, "%2F", Id3, Id4, "%2F", IdRest]);
+    [Id1, Id2, Id3, Id4 | IdRest] = to_list(AccountId),
+    to_binary(["account%2F", Id1, Id2, "%2F", Id3, Id4, "%2F", IdRest]);
 format_account_id(AccountId, 'raw') -> AccountId.
+
+format_account_id(AccountId, Year, Month) when is_integer(Year), is_integer(Month) ->
+    <<(format_account_id(AccountId, 'encoded'))/binary
+      ,"-"
+      ,(to_binary(Year))/binary
+      ,(pad_month(Month))/binary>>.
+
+-spec pad_month(pos_integer()) -> ne_binary().
+pad_month(Month) when Month < 10 ->
+    <<"0", (to_binary(Month))/binary>>;
+pad_month(Month) ->
+    to_binary(Month).
 
 %%--------------------------------------------------------------------
 %% @public
@@ -248,29 +269,20 @@ is_system_admin(Account) ->
 %% 'false'.
 %% @end
 %%--------------------------------------------------------------------
--spec is_account_enabled(api_binary()) -> 'true'. %boolean().
-is_account_enabled('undefined') -> 'true';
-is_account_enabled(_AccountId) ->
-    %% See WHISTLE-1201
-    'true'.
-%%    case wh_cache:peek({?MODULE, is_account_enabled, AccountId}) of
-%%        {ok, Enabled} ->
-%%            lager:debug("account ~s enabled flag is ~s", [AccountId, Enabled]),
-%%            Enabled;
-%%        {error, not_found} ->
-%%            case couch_mgr:open_doc(?WH_ACCOUNTS_DB, AccountId) of
-%%                {ok, JObj} ->
-%%                    PvtEnabled = wh_json:is_false(<<"pvt_enabled">>, JObj) =/= 'true',
-%%                    lager:debug("account ~s enabled flag is ~s", [AccountId, PvtEnabled]),
-%%                    wh_cache:store({?MODULE, is_account_enabled, AccountId}, PvtEnabled, 300),
-%%                    PvtEnabled;
-%%                {error, R} ->
-%%                    lager:debug("unable to find enabled status of account ~s: ~p", [AccountId, R]),
-%%                    wh_cache:store({?MODULE, is_account_enabled, AccountId}, 'true', 300),
-%%                    'true'
-%%            end
-%%    end.
+-spec is_account_enabled(api_binary()) -> boolean().
+is_account_enabled('undefined') -> 'false';
+is_account_enabled(Account) ->
+    AccountId = wh_util:format_account_id(Account, 'raw'),
+    AccountDb = wh_util:format_account_id(Account, 'encoded'),
+    case couch_mgr:open_cache_doc(AccountDb, AccountId) of
+        {'error', _E} ->
+            lager:error("could not open account ~p in ~p", [AccountId, AccountDb]),
+            'false';
+        {'ok', JObj} ->
+            wh_json:is_true(<<"pvt_enabled">>, JObj, 'true') 
+                andalso wh_json:is_true(<<"enabled">>, JObj, 'true')
 
+    end.
 %%--------------------------------------------------------------------
 %% @public
 %% @doc
@@ -306,7 +318,7 @@ try_load_module(Name) ->
     Module = wh_util:to_atom(Name, 'true'),
     try Module:module_info('imports') of
         _ when Module =:= 'undefined' -> 'false';
-        _ -> 
+        _ ->
             {'module', Module} = code:ensure_loaded(Module),
             Module
     catch

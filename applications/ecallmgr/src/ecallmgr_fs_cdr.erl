@@ -45,6 +45,41 @@
                             ,{<<"variable_billsec">>, <<"Billing-Seconds">>}
                             ,{<<"variable_progresssec">>, <<"Ringing-Seconds">>}
                             ,{<<"variable_digits_dialed">>, <<"Digits-Dialed">>}
+                            ,{<<"FreeSWITCH-IPv4">>, <<"Handling-Server-IP">>}
+                            ,{<<"Channel-Read-Codec-Name">>, <<"Read-Codec-Name">>}
+                            ,{<<"Channel-Read-Codec-Rate">>, <<"Read-Codec-Rate">>}
+                            ,{<<"Channel-Read-Codec-Bit-Rate">>, <<"Read-Codec-Bit-Rate">>}
+                            ,{<<"Channel-Write-Codec-Name">>, <<"Write-Codec-Name">>}
+                            ,{<<"Channel-Write-Codec-Rate">>, <<"Write-Codec-Rate">>}
+                            ,{<<"Channel-Write-Codec-Bit-Rate">>, <<"Write-Codec-Bit-Rate">>}
+                            ,{<<"Caller-Profile-Created-Time">>, <<"Caller-Profile-Created-Time">>}
+                            ,{<<"Caller-Channel-Created-Time">>, <<"Caller-Channel-Created-Time">>}
+                            ,{<<"Caller-Channel-Answered-Time">>, <<"Caller-Channel-Answered-Time">>}
+                            ,{<<"Caller-Channel-Progress-Time">>, <<"Caller-Channel-Progress-Time">>}
+                            ,{<<"Caller-Channel-Progress-Media-Time">>, <<"Caller-Channel-Progress-Media-Time">>}
+                            ,{<<"Caller-Channel-Hangup-Time">>, <<"Caller-Channel-Hangup-Time">>}
+                            ,{<<"Caller-Channel-Transfer-Time">>, <<"Caller-Channel-Transfer-Time">>}
+                            ,{<<"Caller-Channel-Resurrect-Time">>, <<"Caller-Channel-Resurrect-Time">>}
+                            ,{<<"Caller-Channel-Bridged-Time">>, <<"Caller-Channel-Bridged-Time">>}
+                            ,{<<"variable_rtp_audio_in_raw_bytes">>, <<"Audio-In-Raw-Bytes">>}
+                            ,{<<"variable_rtp_audio_in_media_bytes">>, <<"Audio-In-Media-Bytes">>}
+                            ,{<<"variable_rtp_audio_in_packet_count">>, <<"Audio-In-Packet-Count">>}
+                            ,{<<"variable_rtp_audio_in_media_packet_count">>, <<"Audio-In-Media-Packet-Count">>}
+                            ,{<<"variable_rtp_audio_in_skip_packet_count">>, <<"Audio-In-Skip-Packet-Count">>}
+                            ,{<<"variable_rtp_audio_in_jb_packet_count">>, <<"Audio-In-JB-Packet-Count">>}
+                            ,{<<"variable_rtp_audio_in_dtmf_packet_count">>, <<"Audio-In-DTMF-Packet-Count">>}
+                            ,{<<"variable_rtp_audio_in_cng_packet_count">>, <<"Audio-In-CNG-Packet-Count">>}
+                            ,{<<"variable_rtp_audio_in_flush_packet_count">>, <<"Audio-In-Flush-Packet-Count">>}
+                            ,{<<"variable_rtp_audio_in_largest_jb_size">>, <<"Audio-In-Largest-JB-Size">>}
+                            ,{<<"variable_rtp_audio_out_raw_bytes">>, <<"Audio-Out-Raw-Bytes">>}
+                            ,{<<"variable_rtp_audio_out_media_bytes">>, <<"Audio-Out-Media-Bytes">>}
+                            ,{<<"variable_rtp_audio_out_packet_count">>, <<"Audio-Out-Packet-Count">>}
+                            ,{<<"variable_rtp_audio_out_media_packet_count">>, <<"Audio-Out-Media-Packet-Count">>}
+                            ,{<<"variable_rtp_audio_out_skip_packet_count">>, <<"Audio-Out-Skip-Packet-Count">>}
+                            ,{<<"variable_rtp_audio_out_dtmf_packet_count">>, <<"Audio-Out-DTMF-Packet-Count">>}
+                            ,{<<"variable_rtp_audio_out_cng_packet_count">>, <<"Audio-Out-CNG-Packet-Count">>}
+                            ,{<<"variable_rtp_audio_rtcp_packet_count">>, <<"Audio-RTCP-Packet-Count">>}
+                            ,{<<"variable_rtp_audio_rtcp_octet_count">>, <<"Audio_RTCP_Octet_Count">>}
                             ,{<<"ecallmgr">>, <<"Custom-Channel-Vars">>}
                             ,{fun(P) -> ecallmgr_util:get_sip_request(P) end, <<"Request">>}
                             ,{fun(P) -> ecallmgr_util:get_sip_to(P) end, <<"To">>}

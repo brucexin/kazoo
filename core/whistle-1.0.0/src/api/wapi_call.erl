@@ -204,7 +204,36 @@
                                         ,<<"Timestamp">>, <<"Duration-Seconds">>, <<"Billing-Seconds">>, <<"Ringing-Seconds">>
                                         ,<<"Call-Direction">>, <<"To-Uri">>, <<"From-Uri">>
                                         ,<<"Digits-Dialed">>, <<"To">>, <<"From">>, <<"Request">>
-                                   ]).
+                                        ,<<"Handling-Server-IP">>
+                                        ,<<"Read-Codec-Name">>, <<"Read-Codec-Rate">>, <<"Read-Codec-Bit-Rate">>
+                                        ,<<"Write-Codec-Name">>, <<"Write-Codec-Rate">>, <<"Write-Codec-Bit-Rate">>
+                                        ,<<"Caller-Profile-Created-Time">>, <<"Caller-Channel-Created-Time">>
+                                        ,<<"Caller-Channel-Answered-Time">>, <<"Caller-Channel-Progress-Time">>
+                                        ,<<"Caller-Channel-Progress-Media-Time">>
+                                        ,<<"Caller-Channel-Hangup-Time">>
+                                        ,<<"Caller-Channel-Transfer-Time">>
+                                        ,<<"Caller-Channel-Resurrect-Time">>
+                                        ,<<"Caller-Channel-Bridged-Time">>
+                                        ,<<"Audio-In-Raw-Bytes">>
+                                        ,<<"Audio-In-Media-Bytes">>
+                                        ,<<"Audio-In-Packet-Count">>
+                                        ,<<"Audio-In-Media-Packet-Count">>
+                                        ,<<"Audio-In-Skip-Packet-Count">>
+                                        ,<<"Audio-In-JB-Packet-Count">>
+                                        ,<<"Audio-In-DTMF-Packet-Count">>
+                                        ,<<"Audio-In-CNG-Packet-Count">>
+                                        ,<<"Audio-In-Flush-Packet-Count">>
+                                        ,<<"Audio-In-Largest-JB-Size">>
+                                        ,<<"Audio-Out-Raw-Bytes">>
+                                        ,<<"Audio-Out-Media-Bytes">>
+                                        ,<<"Audio-Out-Packet-Count">>
+                                        ,<<"Audio-Out-Media-Packet-Count">>
+                                        ,<<"Audio-Out-Skip-Packet-Count">>
+                                        ,<<"Audio-Out-DTMF-Packet-Count">>
+                                        ,<<"Audio-Out-CNG-Packet-Count">>
+                                        ,<<"Audio-RTCP-Packet-Count">>
+                                        ,<<"Audio_RTCP_Octet_Count">>]).
+
 -define(CALL_CDR_VALUES, [{<<"Event-Category">>, <<"call_detail">>}
                           ,{<<"Event-Name">>, <<"cdr">>}
                           ,{<<"Call-Direction">>, [<<"inbound">>, <<"outbound">>]}

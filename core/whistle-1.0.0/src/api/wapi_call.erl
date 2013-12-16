@@ -232,7 +232,10 @@
                                         ,<<"Audio-Out-DTMF-Packet-Count">>
                                         ,<<"Audio-Out-CNG-Packet-Count">>
                                         ,<<"Audio-RTCP-Packet-Count">>
-                                        ,<<"Audio_RTCP_Octet_Count">>]).
+                                        ,<<"Audio_RTCP_Octet_Count">>
+                                        ,<<"Audio-RTCP-Octet-Count">>
+                                        ,<<"RTP-Use-SSRC">>
+                                        ,<<"RTP-Use-PT">>]).
 
 -define(CALL_CDR_VALUES, [{<<"Event-Category">>, <<"call_detail">>}
                           ,{<<"Event-Name">>, <<"cdr">>}

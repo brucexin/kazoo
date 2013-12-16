@@ -79,7 +79,9 @@
                             ,{<<"variable_rtp_audio_out_dtmf_packet_count">>, <<"Audio-Out-DTMF-Packet-Count">>}
                             ,{<<"variable_rtp_audio_out_cng_packet_count">>, <<"Audio-Out-CNG-Packet-Count">>}
                             ,{<<"variable_rtp_audio_rtcp_packet_count">>, <<"Audio-RTCP-Packet-Count">>}
-                            ,{<<"variable_rtp_audio_rtcp_octet_count">>, <<"Audio_RTCP_Octet_Count">>}
+                            ,{<<"variable_rtp_audio_rtcp_octet_count">>, <<"Audio-RTCP-Octet-Count">>}
+                            ,{<<"variable_rtp_use_ssrc">>, <<"RTP-Use-SSRC">>}
+                            ,{<<"variable_rtp_use_pt">>, <<"RTP-Use-PT">>}
                             ,{<<"ecallmgr">>, <<"Custom-Channel-Vars">>}
                             ,{fun(P) -> ecallmgr_util:get_sip_request(P) end, <<"Request">>}
                             ,{fun(P) -> ecallmgr_util:get_sip_to(P) end, <<"To">>}

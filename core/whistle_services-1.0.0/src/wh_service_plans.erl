@@ -25,7 +25,7 @@
                            ,plans = []
                           }).
 
--type(plans() :: [#wh_service_plans{},...] | []).
+-type plans() :: [#wh_service_plans{},...] | [].
 -export_type([plans/0]).
 
 %%--------------------------------------------------------------------
@@ -46,7 +46,9 @@ empty() -> [].
 -spec from_service_json(wh_json:object()) -> plans().
 from_service_json(ServicesJObj) ->
     PlanIds = wh_json:get_keys(<<"plans">>, ServicesJObj),
-    ResellerId = wh_json:get_value(<<"pvt_reseller_id">>, ServicesJObj),
+    ResellerId = wh_json:get_first_defined([<<"pvt_reseller_id">>
+                                            ,<<"reseller_id">>
+                                           ], ServicesJObj),
     get_plans(PlanIds, ResellerId, ServicesJObj).
 
 %%--------------------------------------------------------------------
@@ -60,8 +62,7 @@ public_json(ServicePlans) ->
     public_json(ServicePlans, wh_json:new()).
 
 -spec public_json(plans(), wh_json:object()) -> wh_json:object().
-public_json([], JObj) ->
-    JObj;
+public_json([], JObj) -> JObj;
 public_json([#wh_service_plans{plans=Plans}|ServicePlans], JObj) ->
     NewJObj = lists:foldl(fun(P, J) ->
                                   wh_json:merge_recursive(J, wh_json:get_value(<<"plan">>, P, wh_json:new()))
@@ -131,7 +132,9 @@ activation_charges(Category, Item, ServicePlans) ->
 %% suitable for use with the bookkeepers.
 %% @end
 %%--------------------------------------------------------------------
--spec create_items(wh_json:object()) -> {'ok', wh_service_items:items()} | {'error', 'no_plans'}.
+-spec create_items(wh_json:object()) ->
+                          {'ok', wh_service_items:items()} |
+                          {'error', 'no_plans'}.
 -spec create_items(wh_services:services(), plans()) -> wh_service_items:items().
 
 create_items(ServiceJObj) ->

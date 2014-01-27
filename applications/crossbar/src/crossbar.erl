@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%%% @copyright (C) 2011, VoIP, INC
+%%% @copyright (C) 2011-2013, 2600Hz, INC
 %%% @doc
 %%%
 %%% @end
@@ -29,7 +29,7 @@ start_link() ->
     _ = declare_exchanges(),
     Dispatch = cowboy_router:compile([
                                       %% {HostMatch, list({PathMatch, Handler, Opts})}
-                                      {'_', [{<<"/v1/[...]">>, 'v1_resource', []}
+                                      {'_', [{<<"/:version/[...]">>, 'api_resource', []}
                                              ,{'_', 'crossbar_default_handler', []}
                                             ]}
                                      ]),
@@ -38,7 +38,7 @@ start_link() ->
     crossbar_sup:start_link().
 
 start() ->
-    application:start(crossbar).
+    application:start('crossbar').
 
 %%--------------------------------------------------------------------
 %% @public
@@ -48,9 +48,10 @@ start() ->
 %%--------------------------------------------------------------------
 -spec stop() -> 'ok'.
 stop() ->
-    cowboy:stop_listener('v1_resource'),
-    cowboy:stop_listener('v1_resource_ssl'),
-    exit(whereis('crossbar_sup'), 'shutdown').
+    cowboy:stop_listener('api_resource'),
+    cowboy:stop_listener('api_resource_ssl'),
+    exit(whereis('crossbar_sup'), 'shutdown'),
+    'ok'.
 
 %%--------------------------------------------------------------------
 %% @public
@@ -69,7 +70,6 @@ start_mod(CBMod) -> CBMod:init().
 %% @end
 %%--------------------------------------------------------------------
 -spec stop_mod(atom() | string() | binary()) -> any().
-
 stop_mod(CBMod) when not is_atom(CBMod) -> stop_mod(wh_util:to_atom(CBMod, 'true'));
 stop_mod(CBMod) ->
     crossbar_bindings:flush_mod(CBMod),
@@ -88,11 +88,11 @@ stop_mod(CBMod) ->
 start_deps() ->
     whistle_apps_deps:ensure(?MODULE), % if started by the whistle_controller, this will exist
     _ = [wh_util:ensure_started(App) || App <- ['crypto'
-                                                ,'inets' 
+                                                ,'inets'
                                                 ,'lager'
                                                 ,'whistle_amqp'
-                                                ,'whistle_couch'                                               
-                                                ,'ranch' 
+                                                ,'whistle_couch'
+                                                ,'ranch'
                                                 ,'cowboy'
                                                ]],
     'ok'.
@@ -128,7 +128,7 @@ declare_exchanges() ->
 on_request(Req0) ->
     {Method, Req1} = cowboy_req:method(Req0),
     case Method of
-        'OPTIONS' -> Req1;
+        ?HTTP_OPTIONS -> Req1;
         _ -> Req1
     end.
 
@@ -137,10 +137,10 @@ on_response(_Status, _Headers, _Body, Req0) ->
     {Method, Req1} = cowboy_req:method(Req0),
     case Method of
         ?HTTP_OPTIONS -> Req1;
-        'OPTIONS' -> Req1;
         _ -> Req1
     end.
 
+-spec maybe_start_plaintext(cowboy_router:dispatch_rules()) -> 'ok'.
 maybe_start_plaintext(Dispatch) ->
     case whapps_config:get_is_true(?CONFIG_CAT, <<"use_plaintext">>, 'true') of
         'false' -> lager:info("plaintext api support not enabled");
@@ -150,7 +150,7 @@ maybe_start_plaintext(Dispatch) ->
             Workers = whapps_config:get_integer(?CONFIG_CAT, <<"workers">>, 100),
 
             %% Name, NbAcceptors, Transport, TransOpts, Protocol, ProtoOpts
-            try cowboy:start_http('v1_resource', Workers
+            try cowboy:start_http('api_resource', Workers
                                   ,[{'port', Port}]
                                   ,[{'env', [{'dispatch', Dispatch}
                                              ,{'timeout', ReqTimeout}
@@ -160,21 +160,21 @@ maybe_start_plaintext(Dispatch) ->
                                    ]
                                  ) of
                 {'ok', _} ->
-                    lager:info("started plaintext API server");
-                _Err ->
-                    lager:info("unexpected result when starting API server: ~p", [_Err])
+                    lager:info("started plaintext API server")
             catch
                 _E:_R ->
-                    lager:info("crashed starting API server: ~s: ~p", [_E, _R])
+                    lager:warning("crashed starting API server: ~s: ~p", [_E, _R])
             end
     end.
 
+-spec maybe_start_ssl(cowboy_router:dispatch_rules()) -> 'ok'.
 maybe_start_ssl(Dispatch) ->
     case whapps_config:get_is_true(?CONFIG_CAT, <<"use_ssl">>, 'false') of
         'false' -> lager:info("ssl api support not enabled");
         'true' -> start_ssl(Dispatch)
     end.
 
+-spec start_ssl(cowboy_router:dispatch_rules()) -> 'ok'.
 start_ssl(Dispatch) ->
     try ssl_opts(code:lib_dir('crossbar')) of
         SSLOpts ->
@@ -183,7 +183,7 @@ start_ssl(Dispatch) ->
             ReqTimeout = whapps_config:get_integer(?CONFIG_CAT, <<"request_timeout_ms">>, 10000),
             Workers = whapps_config:get_integer(?CONFIG_CAT, <<"ssl_workers">>, 100),
 
-            try cowboy:start_https('v1_resource_ssl', Workers
+            try cowboy:start_https('api_resource_ssl', Workers
                                    ,SSLOpts
                                    ,[{'env', [{'dispatch', Dispatch}
                                               ,{'timeout', ReqTimeout}
@@ -194,20 +194,19 @@ start_ssl(Dispatch) ->
                                   )
             of
                 {'ok', _} ->
-                    lager:info("started SSL API server on port ~b", [props:get_value('port', SSLOpts)]);
-                _Err ->
-                    lager:info("unexpected result when starting SSL API server: ~p", [_Err])
+                    lager:info("started SSL API server on port ~b", [props:get_value('port', SSLOpts)])
             catch
                 'throw':{'invalid_file', _File} ->
                     lager:info("SSL disabled: failed to find ~s", [_File]);
                 _E:_R ->
-                    lager:info("crashed starting SSL API server: ~s: ~p", [_E, _R])
+                    lager:warning("crashed starting SSL API server: ~s: ~p", [_E, _R])
             end
     catch
         'throw':_E ->
-            lager:debug("failed to start SSL API server: ~p", [_E])
+            lager:warning("failed to start SSL API server: ~p", [_E])
     end.
 
+-spec ssl_opts(list()) -> wh_proplist().
 ssl_opts(RootDir) ->
     BaseOpts = base_ssl_opts(RootDir),
     case whapps_config:get_string(?CONFIG_CAT, <<"ssl_ca_cert">>) of
@@ -215,6 +214,7 @@ ssl_opts(RootDir) ->
         SSLCACert -> [{'cacertfile', SSLCACert} | BaseOpts]
     end.
 
+-spec base_ssl_opts(list()) -> wh_proplist().
 base_ssl_opts(RootDir) ->
     [{'port', whapps_config:get_integer(?CONFIG_CAT, <<"ssl_port">>, 8443)}
      ,{'certfile', find_file(whapps_config:get_string(?CONFIG_CAT
@@ -228,6 +228,7 @@ base_ssl_opts(RootDir) ->
      ,{'password', whapps_config:get_string(?CONFIG_CAT, <<"ssl_password">>, <<>>)}
     ].
 
+-spec find_file(list(), list()) -> list().
 find_file(File, Root) ->
     case filelib:is_file(File) of
         'true' -> File;

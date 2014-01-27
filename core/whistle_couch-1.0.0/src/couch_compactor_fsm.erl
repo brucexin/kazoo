@@ -18,6 +18,7 @@
          ,status/0
          ,is_compactor_running/0
          ,cancel_current_job/0
+         ,cancel_current_shard/0
          ,cancel_all_jobs/0
          ,start_auto_compaction/0
          ,stop_auto_compaction/0
@@ -45,9 +46,9 @@
          ,code_change/4
 
          %% state functions
-         ,ready/2, ready/3                     % FSM is 'ready' to compact something
-         ,compact/2, compact/3         % FSM is compacting all nodes
-         ,wait/2, wait/3                       % FSM is waiting to compact the next thing
+         ,ready/2, ready/3     % FSM is 'ready' to compact something
+         ,compact/2, compact/3 % FSM is compacting all nodes
+         ,wait/2, wait/3       % FSM is waiting to compact the next thing
         ]).
 
 -include("wh_couch.hrl").
@@ -73,7 +74,7 @@
              <<"infinity">> -> 'infinity';
              N -> wh_util:to_integer(N)
          end
-       ). % five minutes
+       ).
 
 -define(AUTOCOMPACTION_CHECK_TIMEOUT, whapps_config:get_integer(?CONFIG_CAT, <<"autocompaction_check">>, 60000)).
 
@@ -183,6 +184,15 @@ status() ->
 cancel_current_job() ->
     case is_compactor_running() of
         'true' -> gen_fsm:sync_send_event(?SERVER, 'cancel_current_job');
+        'false' -> {'error', 'compactor_down'}
+    end.
+
+-spec cancel_current_shard() -> {'ok', 'shard_cancelled'} |
+                                {'error', 'no_shard_running'} |
+                                not_compacting().
+cancel_current_shard() ->
+    case is_compactor_running() of
+        'true' -> gen_fsm:sync_send_event(?SERVER, 'cancel_current_shard');
         'false' -> {'error', 'compactor_down'}
     end.
 
@@ -333,6 +343,8 @@ ready('status', _, #state{}=State) ->
 
 ready('cancel_current_job', _, State) ->
     {'reply', {'error', 'no_job_running'}, 'ready', State};
+ready('cancel_current_shard', _, State) ->
+    {'reply', {'error', 'no_shard_running'}, 'ready', State};
 
 ready('cancel_all_jobs', _, #state{queued_jobs=Jobs}=State) ->
     _ = [ maybe_send_update(P, Ref, 'job_cancelled') || {_, P, Ref} <- queue:to_list(Jobs)],
@@ -400,13 +412,17 @@ compact({'compact', N}, #state{conn='undefined'
             maybe_send_update(Pid, Ref, 'job_finished'),
             gen_fsm:send_event(self(), 'next_job'),
             lager:debug("returning to 'ready'"),
-            {'next_state', 'ready', State#state{conn='undefined'
-                                                ,admin_conn='undefined'
-                                                ,current_node='undefined'
-                                                ,current_db='undefined'
-                                                ,current_job_pid='undefined'
-                                                ,current_job_ref='undefined'
-                                               }};
+            {'next_state'
+             ,'ready'
+             ,State#state{conn='undefined'
+                          ,admin_conn='undefined'
+                          ,current_node='undefined'
+                          ,current_db='undefined'
+                          ,current_job_pid='undefined'
+                          ,current_job_ref='undefined'
+                         }
+             ,'hibernate'
+            };
         {Conn, AdminConn} ->
             lager:debug("got conns, let's compact"),
             gen_fsm:send_event(self(), {'compact', N}),
@@ -420,12 +436,16 @@ compact({'compact', N}, #state{conn='undefined'
             maybe_send_update(Pid, Ref, 'job_finished'),
             gen_fsm:send_event(self(), 'next_job'),
             lager:debug("returning to 'ready'"),
-            {'next_state', 'ready', State#state{conn='undefined'
-                                                ,admin_conn='undefined'
-                                                ,current_node='undefined'
-                                                ,current_job_pid='undefined'
-                                                ,current_job_ref='undefined'
-                                               }}
+            {'next_state'
+             ,'ready'
+             ,State#state{conn='undefined'
+                          ,admin_conn='undefined'
+                          ,current_node='undefined'
+                          ,current_job_pid='undefined'
+                          ,current_job_ref='undefined'
+                         }
+             ,'hibernate'
+            }
     end;
 compact({'compact', N}=Msg, #state{conn='undefined'
                                    ,admin_conn='undefined'
@@ -468,13 +488,17 @@ compact({'compact_db', N, D}=Msg, #state{conn='undefined'
             maybe_send_update(Pid, Ref, 'job_finished'),
             gen_fsm:send_event(self(), 'next_job'),
             lager:debug("returning to 'ready'"),
-            {'next_state', 'ready', State#state{conn='undefined'
-                                                ,admin_conn='undefined'
-                                                ,current_node='undefined'
-                                                ,current_db='undefined'
-                                                ,current_job_pid='undefined'
-                                                ,current_job_ref='undefined'
-                                               }};
+            {'next_state'
+             ,'ready'
+             ,State#state{conn='undefined'
+                          ,admin_conn='undefined'
+                          ,current_node='undefined'
+                          ,current_db='undefined'
+                          ,current_job_pid='undefined'
+                          ,current_job_ref='undefined'
+                         }
+             ,'hibernate'
+            };
         {Conn, AdminConn} ->
             lager:debug("got conns, let's compact"),
             gen_fsm:send_event(self(), Msg),
@@ -489,13 +513,17 @@ compact({'compact_db', N, D}=Msg, #state{conn='undefined'
             maybe_send_update(Pid, Ref, 'job_finished'),
             gen_fsm:send_event(self(), 'next_job'),
             lager:debug("returning to 'ready'"),
-            {'next_state', 'ready', State#state{conn='undefined'
-                                                ,admin_conn='undefined'
-                                                ,current_node='undefined'
-                                                ,current_db='undefined'
-                                                ,current_job_pid='undefined'
-                                                ,current_job_ref='undefined'
-                                               }}
+            {'next_state'
+             ,'ready'
+             ,State#state{conn='undefined'
+                          ,admin_conn='undefined'
+                          ,current_node='undefined'
+                          ,current_db='undefined'
+                          ,current_job_pid='undefined'
+                          ,current_job_ref='undefined'
+                         }
+             ,'hibernate'
+            }
     end;
 
 compact({'compact_db', N, D}=Msg, #state{conn='undefined'
@@ -538,22 +566,30 @@ compact('compact', #state{nodes=[]
     maybe_send_update(Pid, Ref, 'job_finished'),
     gen_fsm:send_event(self(), 'next_job'),
     lager:debug("returning to 'ready'"),
-    {'next_state', 'ready', State#state{conn='undefined'
-                                        ,admin_conn='undefined'
-                                        ,current_node='undefined'
-                                        ,current_db='undefined'
-                                        ,current_job_pid='undefined'
-                                        ,current_job_ref='undefined'
-                                       }};
+    {'next_state'
+     ,'ready'
+     ,State#state{conn='undefined'
+                  ,admin_conn='undefined'
+                  ,current_node='undefined'
+                  ,current_db='undefined'
+                  ,current_job_pid='undefined'
+                  ,current_job_ref='undefined'
+                 }
+     ,'hibernate'
+    };
 
 compact('compact', #state{nodes=[{N, _}=Node|Ns]}=State) ->
     lager:debug("compact node ~s", [N]),
     gen_fsm:send_event(self(), {'compact', Node}),
-    {'next_state', 'compact', State#state{nodes=Ns}};
+    {'next_state', 'compact', State#state{conn='undefined'
+                                         ,admin_conn='undefined'
+                                         ,nodes=Ns}};
 compact('compact', #state{nodes=[N|Ns]}=State) ->
     lager:debug("compact node ~s", [N]),
     gen_fsm:send_event(self(), {'compact', N}),
-    {'next_state', 'compact', State#state{nodes=Ns}};
+    {'next_state', 'compact', State#state{conn='undefined'
+                                         ,admin_conn='undefined'
+                                         ,nodes=Ns}};
 
 compact({'compact', {N, _}}, #state{admin_conn=AdminConn}=State) ->
     lager:debug("compacting node ~s w/ options", [N]),
@@ -580,6 +616,7 @@ compact({'compact', {N, _}, D}, State) ->
     lager:debug("compacting node ~s db ~s", [N, D]),
     gen_fsm:send_event(self(), {'compact', N, D}),
     {'next_state', 'compact', State};
+
 compact({'compact', N, D}, #state{conn=Conn
                                   ,admin_conn=AdminConn
                                   ,dbs=[]
@@ -596,10 +633,11 @@ compact({'compact', N, D}, #state{conn=Conn
             gen_fsm:send_event_after(?SLEEP_BETWEEN_POLL, 'compact'),
             {'next_state', 'compact', State#state{current_db='undefined'}};
         'true' ->
-            lager:debug("compacting ~s on ~s", [D, N]),
+            lager:debug("db exists and should compact"),
             Ss = db_shards(AdminConn, N, D),
             DDs = db_design_docs(Conn, D),
             gen_fsm:send_event(self(), {'compact', N, D, Ss, DDs}),
+            lager:debug("compacting ~s on ~s", [D, N]),
             {'next_state', 'compact', State#state{current_db=D
                                                   ,current_node=N
                                                  }}
@@ -624,10 +662,11 @@ compact({'compact', N, D}, #state{conn=Conn
                                                   ,current_node=N
                                                  }};
         'true' ->
-            lager:debug("compacting ~s on ~s", [D, N]),
+            lager:debug("db exists and should compact"),
             Ss = db_shards(AdminConn, N, D),
             DDs = db_design_docs(Conn, D),
             gen_fsm:send_event(self(), {'compact', N, D, Ss, DDs}),
+            lager:debug("compacting ~s on ~s", [D, N]),
             {'next_state', 'compact', State#state{current_db=D
                                                   ,current_node=N
                                                  }}
@@ -654,18 +693,23 @@ compact({'compact_db', N, D}, #state{conn=Conn
             maybe_send_update(Pid, Ref, 'job_finished'),
             _R = gen_fsm:send_event_after(?SLEEP_BETWEEN_POLL, 'next_job'),
             lager:debug("returning to 'ready': ~p", [_R]),
-            {'next_state', 'ready', State#state{conn='undefined'
-                                                ,admin_conn='undefined'
-                                                ,current_node='undefined'
-                                                ,current_db='undefined'
-                                                ,current_job_pid='undefined'
-                                                ,current_job_ref='undefined'
-                                               }};
+            {'next_state'
+             ,'ready'
+             ,State#state{conn='undefined'
+                          ,admin_conn='undefined'
+                          ,current_node='undefined'
+                          ,current_db='undefined'
+                          ,current_job_pid='undefined'
+                          ,current_job_ref='undefined'
+                         }
+             ,'hibernate'
+            };
         'true' ->
-            lager:debug("compacting ~s on ~s", [D, N]),
+            lager:debug("db exists and should compact"),
             Ss = db_shards(AdminConn, N, D),
             DDs = db_design_docs(Conn, D),
             gen_fsm:send_event(self(), {'compact_db', N, D, Ss, DDs}),
+            lager:debug("compacting ~s on ~s", [D, N]),
             {'next_state', 'compact', State#state{current_node=N
                                                   ,current_db=D
                                                  }}
@@ -689,10 +733,11 @@ compact({'compact_db', N, D}, #state{conn=Conn
                                                   ,current_db=D
                                                  }};
         'true' ->
-            lager:debug("compacting db '~s' on node '~s'", [D, N]),
+            lager:debug("db exists and should compact"),
             Ss = db_shards(AdminConn, N, D),
             DDs = db_design_docs(Conn, D),
             gen_fsm:send_event(self(), {'compact_db', N, D, Ss, DDs}),
+            lager:debug("compacting db '~s' on node '~s'", [D, N]),
             {'next_state', 'compact', State#state{current_node=N
                                                   ,current_db=D
                                                  }}
@@ -713,14 +758,14 @@ compact({'compact', N, D, Ss, DDs}, #state{admin_conn=AdminConn
     try lists:split(?MAX_COMPACTING_SHARDS, Ss) of
         {Compact, Shards} ->
             lager:debug("compacting ~b shards for ~s on ~s", [?MAX_COMPACTING_SHARDS, D, N]),
-            ShardsPidRef = compact_shards(AdminConn, Compact, DDs),
+            ShardsPidRef = compact_shards(AdminConn, N, Compact, DDs),
             {'next_state', 'compact', State#state{shards_pid_ref=ShardsPidRef
                                                   ,next_compaction_msg={'compact', N, D, Shards, DDs}
                                                  }}
     catch
         'error':'badarg' ->
             lager:debug("compacting last of the shards for ~s on ~s", [D, N]),
-            ShardsPidRef = compact_shards(AdminConn, Ss, DDs),
+            ShardsPidRef = compact_shards(AdminConn, N, Ss, DDs),
             {'next_state', 'compact', State#state{shards_pid_ref=ShardsPidRef
                                                   ,next_compaction_msg='compact'
                                                  }}
@@ -731,14 +776,14 @@ compact({'compact', N, D, Ss, DDs}, #state{admin_conn=AdminConn
     try lists:split(?MAX_COMPACTING_SHARDS, Ss) of
         {Compact, Shards} ->
             lager:debug("compacting ~b shards for ~s on ~s", [?MAX_COMPACTING_SHARDS, D, N]),
-            ShardsPidRef = compact_shards(AdminConn, Compact, DDs),
+            ShardsPidRef = compact_shards(AdminConn, N, Compact, DDs),
             {'next_state', 'compact', State#state{shards_pid_ref=ShardsPidRef
                                                   ,next_compaction_msg={'compact', N, D, Shards, DDs}
                                                  }}
     catch
         'error':'badarg' ->
             lager:debug("compacting last of the shards for ~s on ~s", [D, N]),
-            ShardsPidRef = compact_shards(AdminConn, Ss, DDs),
+            ShardsPidRef = compact_shards(AdminConn, N, Ss, DDs),
             {'next_state', 'compact', State#state{dbs=Dbs
                                                   ,shards_pid_ref=ShardsPidRef
                                                   ,next_compaction_msg={'compact', N, Db}
@@ -760,17 +805,24 @@ compact({'compact_db', N, D, [], _}, #state{nodes=[]
     maybe_send_update(Pid, Ref, 'job_finished'),
     gen_fsm:send_event(self(), 'next_job'),
     lager:debug("returning to 'ready'"),
-    {'next_state', 'ready', State#state{conn='undefined'
-                                        ,admin_conn='undefined'
-                                        ,current_node='undefined'
-                                        ,current_db='undefined'
-                                        ,current_job_pid='undefined'
-                                        ,current_job_ref='undefined'
-                                        ,next_compaction_msg='undefined'
-                                       }};
+    {'next_state'
+     ,'ready'
+     ,State#state{conn='undefined'
+                  ,admin_conn='undefined'
+                  ,current_node='undefined'
+                  ,current_db='undefined'
+                  ,current_job_pid='undefined'
+                  ,current_job_ref='undefined'
+                  ,next_compaction_msg='undefined'
+                 }
+     ,'hibernate'
+    };
 
 compact({'rebuild_views', N, D, DDs}, #state{conn=Conn}=State) ->
-    _P = spawn(?MODULE, 'rebuild_design_docs', [Conn, D, DDs]),
+    _P = spawn(fun() ->
+                       put('callid', N),
+                       ?MODULE:rebuild_design_docs(Conn, encode_db(D), DDs)
+               end),
     lager:debug("rebuilding views in ~p", [_P]),
     gen_fsm:send_event(self(), {'compact_db', N, D, [], DDs}),
     {'next_state', 'compact', State};
@@ -778,20 +830,22 @@ compact({'rebuild_views', N, D, DDs}, #state{conn=Conn}=State) ->
 compact({'compact_db', N, D, [], _}, #state{nodes=[Node|Ns]}=State) ->
     lager:debug("no shards left to compact for db '~s' on node '~s'", [D, N]),
     gen_fsm:send_event(self(), {'compact_db', Node, D}),
-    {'next_state', 'compact', State#state{nodes=Ns
+    {'next_state', 'compact', State#state{conn='undefined'
+                                         ,admin_conn='undefined'
+                                         ,nodes=Ns
                                          ,dbs=[D]
                                          }};
 compact({'compact_db', N, D, Ss, DDs}, #state{admin_conn=AdminConn}=State) ->
     lager:debug("compacting shards for db '~s' on node '~s'", [D, N]),
     try lists:split(?MAX_COMPACTING_SHARDS, Ss) of
         {Compact, Shards} ->
-            ShardsPidRef = compact_shards(AdminConn, Compact, DDs),
+            ShardsPidRef = compact_shards(AdminConn, N, Compact, DDs),
             {'next_state', 'compact', State#state{shards_pid_ref=ShardsPidRef
                                                   ,next_compaction_msg={'compact_db', N, D, Shards, DDs}
                                                  }}
     catch
         'error':'badarg' ->
-            ShardsPidRef = compact_shards(AdminConn, Ss, DDs),
+            ShardsPidRef = compact_shards(AdminConn, N, Ss, DDs),
             {'next_state', 'compact', State#state{shards_pid_ref=ShardsPidRef
                                                   ,next_compaction_msg={'rebuild_views', N, D, DDs}
                                                  }}
@@ -813,6 +867,12 @@ compact('status', _, #state{current_node=N
                       ,{'dbs_left', length(Dbs)}
                      ]}, 'compact', State};
 
+compact('cancel_current_shard', _, #state{shards_pid_ref='undefined'}=State) ->
+    {'reply', {'ok', 'shard_cancelled'}, 'compact', State};
+compact('cancel_current_shard', _, #state{shards_pid_ref={Pid, Ref}}=State) ->
+    lager:debug("cancelling pidref ~p(~p)", [Pid, Ref]),
+    Pid ! 'cancel_shard',
+    {'reply', {'ok', 'shard_cancelled'}, 'compact', State};
 compact('cancel_current_job', _, #state{current_job_pid=Pid
                                         ,current_job_ref=Ref
                                        }=State) ->
@@ -820,7 +880,9 @@ compact('cancel_current_job', _, #state{current_job_pid=Pid
     maybe_send_update(Pid, Ref, 'job_cancelled'),
     gen_fsm:send_event(self(), 'next_job'),
     lager:debug("returning to 'ready'"),
-    {'reply', {'ok', 'job_cancelled'}, 'ready'
+    {'reply'
+     ,{'ok', 'job_cancelled'}
+     ,'ready'
      ,State#state{conn='undefined'
                   ,admin_conn='undefined'
                   ,current_node='undefined'
@@ -830,7 +892,9 @@ compact('cancel_current_job', _, #state{current_job_pid=Pid
                   ,wait_ref='undefined'
                   ,current_job_pid='undefined'
                   ,current_job_ref='undefined'
-                 }};
+                 }
+     ,'hibernate'
+    };
 compact('cancel_all_jobs', _, #state{queued_jobs=Jobs
                                      ,current_job_pid=CPid
                                      ,current_job_ref=CRef
@@ -841,7 +905,9 @@ compact('cancel_all_jobs', _, #state{queued_jobs=Jobs
 
     _ = [ maybe_send_update(P, Ref, 'job_cancelled') || {_, P, Ref} <- queue:to_list(Jobs)],
     lager:debug("returning to 'ready'"),
-    {'reply', {'ok', 'jobs_cancelled'}, 'ready'
+    {'reply'
+     ,{'ok', 'jobs_cancelled'}
+     ,'ready'
      ,State#state{conn='undefined'
                   ,admin_conn='undefined'
                   ,current_node='undefined'
@@ -852,7 +918,9 @@ compact('cancel_all_jobs', _, #state{queued_jobs=Jobs
                   ,current_job_pid='undefined'
                   ,current_job_ref='undefined'
                   ,queued_jobs=queue:new()
-                 }};
+                 }
+     ,'hibernate'
+    };
 compact(Msg, {NewP, _}, #state{queued_jobs=Jobs}=State) ->
     lager:debug("recv msg, assuming new job: ~p", [Msg]),
     {Ref, Jobs1} = queue_job(Msg, NewP, Jobs),
@@ -865,7 +933,7 @@ wait({'timeout', Ref, Msg}, #state{wait_ref=Ref}=State) ->
     {'next_state', 'compact', State#state{wait_ref='undefined'}};
 wait(_Msg, State) ->
     lager:debug("unhandled wait/2 msg: ~p", [_Msg]),
-    {'next_state', 'wait', State}.
+    {'next_state', 'wait', State, 'hibernate'}.
 
 wait('status', _, #state{current_node=N
                          ,current_db=D
@@ -874,15 +942,19 @@ wait('status', _, #state{current_node=N
                          ,nodes=Ns
                          ,dbs=Dbs
                         }= State) ->
-    {'reply', {'ok', [{'node', N}
-                      ,{'db', D}
-                      ,{'wait_left', erlang:read_timer(Ref)}
-                      ,{'queued_jobs', queued_jobs_status(Jobs)}
-                      ,{'nodes_left', length(Ns)}
-                      ,{'dbs_left', length(Dbs)}
-                     ]}
-     ,'wait', State};
-
+    {'reply'
+     ,{'ok', [{'node', N}
+              ,{'db', D}
+              ,{'wait_left', erlang:read_timer(Ref)}
+              ,{'queued_jobs', queued_jobs_status(Jobs)}
+              ,{'nodes_left', length(Ns)}
+              ,{'dbs_left', length(Dbs)}
+             ]}
+     ,'wait'
+     ,State
+    };
+wait('cancel_current_shard', _, State) ->
+    {'reply', {'error', 'no_shard_running'}, 'wait', State, 'hibernate'};
 wait('cancel_current_job', _, #state{current_job_pid=Pid
                                      ,current_job_ref=Ref
                                      ,wait_ref=WRef
@@ -892,16 +964,21 @@ wait('cancel_current_job', _, #state{current_job_pid=Pid
     _ = erlang:cancel_timer(WRef),
     gen_fsm:send_event(self(), 'next_job'),
     lager:debug("returning to 'ready'"),
-    {'reply', {'ok', 'job_cancelled'}, 'ready', State#state{conn='undefined'
-                                                            ,admin_conn='undefined'
-                                                            ,current_node='undefined'
-                                                            ,current_db='undefined'
-                                                            ,nodes=[]
-                                                            ,dbs=[]
-                                                            ,wait_ref='undefined'
-                                                            ,current_job_pid='undefined'
-                                                            ,current_job_ref='undefined'
-                                                           }};
+    {'reply'
+     ,{'ok', 'job_cancelled'}
+     ,'ready'
+     ,State#state{conn='undefined'
+                  ,admin_conn='undefined'
+                  ,current_node='undefined'
+                  ,current_db='undefined'
+                  ,nodes=[]
+                  ,dbs=[]
+                  ,wait_ref='undefined'
+                  ,current_job_pid='undefined'
+                  ,current_job_ref='undefined'
+                 }
+     ,'hibernate'
+    };
 wait('cancel_all_jobs', _, #state{queued_jobs=Jobs
                                   ,current_job_pid=CPid
                                   ,current_job_ref=CRef
@@ -914,22 +991,32 @@ wait('cancel_all_jobs', _, #state{queued_jobs=Jobs
 
     _ = [ maybe_send_update(P, Ref, 'job_cancelled') || {_, P, Ref} <- queue:to_list(Jobs)],
     lager:debug("returning to 'ready'"),
-    {'reply', {'ok', 'jobs_cancelled'}, 'ready', State#state{conn='undefined'
-                                                             ,admin_conn='undefined'
-                                                             ,current_node='undefined'
-                                                             ,current_db='undefined'
-                                                             ,nodes=[]
-                                                             ,dbs=[]
-                                                             ,wait_ref='undefined'
-                                                             ,current_job_pid='undefined'
-                                                             ,current_job_ref='undefined'
-                                                             ,queued_jobs=queue:new()
-                                                            }};
+    {'reply'
+     ,{'ok', 'jobs_cancelled'}
+     ,'ready'
+     ,State#state{conn='undefined'
+                  ,admin_conn='undefined'
+                  ,current_node='undefined'
+                  ,current_db='undefined'
+                  ,nodes=[]
+                  ,dbs=[]
+                  ,wait_ref='undefined'
+                  ,current_job_pid='undefined'
+                  ,current_job_ref='undefined'
+                  ,queued_jobs=queue:new()
+                 }
+     ,'hibernate'
+    };
 
 wait(Msg, {NewP, _}, #state{queued_jobs=Jobs}=State) ->
     lager:debug("recv msg, assuming new job: ~p", [Msg]),
     {Ref, Jobs1} = queue_job(Msg, NewP, Jobs),
-    {'reply', {'queued', Ref}, 'wait', State#state{queued_jobs=Jobs1}}.
+    {'reply'
+     ,{'queued', Ref}
+     ,'wait'
+     ,State#state{queued_jobs=Jobs1}
+     ,'hibernate'
+    }.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -989,8 +1076,10 @@ handle_sync_event(_Event, _From, StateName, State) ->
 %%                   {stop, Reason, NewState}
 %% @end
 %%--------------------------------------------------------------------
-handle_info('$maybe_start_auto_compaction_job', CurrentState, State) ->
+handle_info('$maybe_start_auto_compaction_job', 'ready'=CurrentState, State) ->
     maybe_start_auto_compaction_job(),
+    {'next_state', CurrentState, State, 'hibernate'};
+handle_info('$maybe_start_auto_compaction_job', CurrentState, State) ->
     {'next_state', CurrentState, State};
 handle_info({'DOWN', Ref, 'process', P, _Reason}, _StateName, #state{shards_pid_ref={P, Ref}
                                                                      ,next_compaction_msg=Msg
@@ -1001,10 +1090,14 @@ handle_info({'DOWN', Ref, 'process', P, _Reason}, _StateName, #state{shards_pid_
     lager:debug("old wait ref: ~p new wait ref: ~p", [_OldWaitRef, WaitRef]),
     lager:debug("next compaction msg: ~p", [Msg]),
 
-    {'next_state', 'wait', State#state{wait_ref=WaitRef
-                                       ,next_compaction_msg='undefined'
-                                       ,shards_pid_ref='undefined'
-                                      }};
+    {'next_state'
+     ,'wait'
+     ,State#state{wait_ref=WaitRef
+                  ,next_compaction_msg='undefined'
+                  ,shards_pid_ref='undefined'
+                 }
+     ,'hibernate'
+    };
 handle_info(_Info, StateName, #state{}=State) ->
     lager:debug("unhandled msg for ~s: ~p", [StateName, _Info]),
     {'next_state', StateName, State}.
@@ -1065,19 +1158,21 @@ node_dbs(AdminConn) ->
     {'ok', Dbs} = couch_util:all_docs(AdminConn, <<"dbs">>, []),
     {'ok', shuffle([wh_json:get_value(<<"id">>, Db) || Db <- Dbs])}.
 
+-spec db_shards(server(), ne_binary(), ne_binary()) -> ne_binaries().
 db_shards(AdminConn, N, D) ->
     case couch_util:open_cache_doc(AdminConn, <<"dbs">>, D, []) of
         {'ok', Doc} ->
             Suffix = wh_json:get_value(<<"shard_suffix">>, Doc),
             Ranges = wh_json:get_value([<<"by_node">>, N], Doc, []),
             [<<"shards%2f", Range/binary, "%2f", (encode_db(D))/binary, (wh_util:to_binary(Suffix))/binary>>
-                 || Range <- Ranges
+             || Range <- Ranges
             ];
         {'error', _E} ->
             lager:debug("failed to fetch shards for ~s on ~s", [D, N]),
             []
     end.
 
+-spec db_design_docs(server(), ne_binary()) -> ne_binaries().
 db_design_docs(Conn, D) ->
     case couch_util:all_design_docs(Conn, encode_db(D), []) of
         {'ok', Designs} -> [encode_design_doc(wh_json:get_value(<<"id">>, Design)) || Design <- Designs];
@@ -1086,8 +1181,8 @@ db_design_docs(Conn, D) ->
 
 -spec rebuild_design_docs(server(), ne_binary(), ne_binaries()) -> 'ok'.
 -spec rebuild_design_doc(server(), ne_binary(), ne_binary()) -> 'ok'.
+-spec rebuild_design_doc(server(), ne_binary(), ne_binary(), ne_binary()) -> 'ok'.
 rebuild_design_docs(Conn, D, DDs) ->
-    put('callid', 'rebuild_design_docs'),
     _ = [rebuild_design_doc(Conn, D, DD) || DD <- DDs],
     'ok'.
 
@@ -1109,6 +1204,8 @@ rebuild_design_doc(Conn, D, DD, DesignDoc) ->
             rebuild_views(Conn, D, DD, Views)
     end.
 
+-spec rebuild_views(server(), ne_binary(), ne_binary(), ne_binaries()) -> 'ok'.
+-spec rebuild_view(server(), ne_binary(), ne_binary(), ne_binary()) -> 'ok'.
 rebuild_views(Conn, D, DD, Views) ->
     [rebuild_view(Conn, D, DD, V) || V <- Views],
     'ok'.
@@ -1126,29 +1223,34 @@ rebuild_view(Conn, D, DD, View) ->
             'ok' = timer:sleep(?SLEEP_BETWEEN_VIEWS)
     end.
 
--spec compact_shards(server(), list(), list()) -> {pid(), reference()}.
-compact_shards(AdminConn, Ss, DDs) ->
-    LogId = get('callid'),
+-spec compact_shards(server(), list(), list(), list()) -> pid_ref().
+compact_shards(AdminConn, Node, Ss, DDs) ->
     PR = spawn_monitor(fun() ->
-                               put('callid', LogId),
+                               put('callid', Node),
                                Ps = [spawn_monitor(?MODULE, 'compact_shard', [AdminConn, Shard, DDs]) || Shard <- Ss],
                                lager:debug("shard compaction pids: ~p", [Ps]),
                                wait_for_pids(?MAX_WAIT_FOR_COMPACTION_PIDS, Ps)
                        end),
-    lager:debug("compacting shards in ~p", [PR]),
+    lager:debug("compacting ~s shards in ~p", [Node, PR]),
     PR.
 
+-spec wait_for_pids(wh_timeout(), pid_refs()) -> 'ok'.
 wait_for_pids(_, []) -> lager:debug("done waiting for compaction pids");
 wait_for_pids(MaxWait, [{P,Ref}|Ps]) ->
     lager:debug("waiting ~p for compaction pid ~p(~p)", [MaxWait, P, Ref]),
-    receive {'DOWN', Ref, 'process', P, _} ->
+    receive
+        {'DOWN', Ref, 'process', P, _} ->
             lager:debug("recv down from ~p(~p)", [P, Ref]),
+            wait_for_pids(MaxWait, Ps);
+        'cancel_shard' ->
+            lager:debug("cancelling waiting for ~p(~p)", [P, Ref]),
             wait_for_pids(MaxWait, Ps)
     after MaxWait ->
             lager:debug("timed out waiting for ~p(~p), moving on", [P, Ref]),
             wait_for_pids(MaxWait, Ps)
     end.
 
+-spec compact_shard(server(), ne_binary(), ne_binaries()) -> 'ok'.
 compact_shard(AdminConn, S, DDs) ->
     put('callid', 'compact_shard'),
 
@@ -1164,20 +1266,25 @@ compact_shard(AdminConn, S, DDs) ->
             start_compacting_shard(AdminConn, S, DDs)
     end.
 
+-spec start_compacting_shard(server(), ne_binary(), ne_binaries()) -> 'ok'.
 start_compacting_shard(AdminConn, S, DDs) ->
     case couch_util:db_compact(AdminConn, S) of
         'true' -> continue_compacting_shard(AdminConn, S, DDs);
         'false' -> lager:debug("compaction of shard failed, skipping")
     end.
 
+-spec continue_compacting_shard(server(), ne_binary(), ne_binaries()) -> 'ok'.
 continue_compacting_shard(AdminConn, S, DDs) ->
     wait_for_compaction(AdminConn, S),
 
     %% cleans up old view indexes
+    lager:debug("db view cleanup starting"),
     couch_util:db_view_cleanup(AdminConn, S),
+
     wait_for_compaction(AdminConn, S),
 
     %% compacts views
+    lager:debug("design doc compaction starting"),
     compact_design_docs(AdminConn, S, DDs),
 
     case get_db_disk_and_data(AdminConn, S) of
@@ -1187,6 +1294,7 @@ continue_compacting_shard(AdminConn, S, DDs) ->
             lager:debug("finished compacting shard: ~p disk/~p data", [AfterDisk, AfterData])
     end.
 
+-spec compact_design_docs(server(), ne_binary(), ne_binaries()) -> 'ok'.
 compact_design_docs(AdminConn, S, DDs) ->
     try lists:split(?MAX_COMPACTING_VIEWS, DDs) of
         {Compact, Remaining} ->
@@ -1202,6 +1310,14 @@ compact_design_docs(AdminConn, S, DDs) ->
             wait_for_design_compaction(AdminConn, S, DDs)
     end.
 
+-type db_info_resp() :: {'ok', wh_json:object()} |
+                        couchbeam_error().
+-type design_info_resp() :: {'ok', wh_json:object()} |
+                            couchbeam_error().
+
+-spec wait_for_design_compaction(server(), ne_binary(), ne_binaries()) -> 'ok'.
+-spec wait_for_design_compaction(server(), ne_binary(), ne_binaries(), ne_binary(), design_info_resp()) ->
+                                        'ok'.
 wait_for_design_compaction(_, _, []) -> 'ok';
 wait_for_design_compaction(AdminConn, Shard, [DD|DDs]) ->
     wait_for_design_compaction(AdminConn, Shard, DDs, DD, couch_util:design_info(AdminConn, Shard, DD)).
@@ -1210,8 +1326,10 @@ wait_for_design_compaction(AdminConn, Shard, DDs, DD, {'error', {'conn_failed', 
     lager:debug("connecting to BigCouch timed out, waiting then retrying"),
     'ok' = timer:sleep(?SLEEP_BETWEEN_POLL),
     wait_for_design_compaction(AdminConn, Shard, DDs, DD, couch_util:design_info(AdminConn, Shard, DD));
+wait_for_design_compaction(AdminConn, Shard, DDs, _DD, {'error', 'not_found'}) ->
+    wait_for_design_compaction(AdminConn, Shard, DDs);
 wait_for_design_compaction(AdminConn, Shard, DDs, _DD, {'error', _E}) ->
-    lager:debug("failed design status for '~s': ~p", [_DD, _E]),
+    lager:debug("failed design status for '~s/~s': ~p", [Shard, _DD, _E]),
     'ok' = timer:sleep(?SLEEP_BETWEEN_POLL),
     wait_for_design_compaction(AdminConn, Shard, DDs);
 wait_for_design_compaction(AdminConn, Shard, DDs, DD, {'ok', DesignInfo}) ->
@@ -1223,6 +1341,8 @@ wait_for_design_compaction(AdminConn, Shard, DDs, DD, {'ok', DesignInfo}) ->
             wait_for_design_compaction(AdminConn, Shard, DDs, DD, couch_util:design_info(AdminConn, Shard, DD))
     end.
 
+-spec wait_for_compaction(server(), ne_binary()) -> 'ok'.
+-spec wait_for_compaction(server(), ne_binary(), db_info_resp()) -> 'ok'.
 wait_for_compaction(AdminConn, S) ->
     wait_for_compaction(AdminConn, S, couch_util:db_info(AdminConn, S)).
 
@@ -1240,6 +1360,9 @@ wait_for_compaction(AdminConn, S, {'ok', ShardData}) ->
             wait_for_compaction(AdminConn, S)
     end.
 
+-spec get_node_connections({ne_binary(), list()} | ne_binary(), atom()) ->
+                                  {server(), server()} |
+                                  {'error', 'no_connection'}.
 get_node_connections({N, Opts}, ConfigCookie) ->
     lager:debug("getting connections from opts: ~p", [Opts]),
     [_, Host] = binary:split(N, <<"@">>),
@@ -1280,6 +1403,12 @@ get_node_connections(Host, Port, User, Pass, AdminPort, Retries) ->
             get_node_connections(Host, Port, User, Pass, AdminPort, Retries+1);
         {_, {'error', 'timeout'}} ->
             lager:debug("timed out getting connection for ~s, try again", [Host]),
+            get_node_connections(Host, Port, User, Pass, AdminPort, Retries+1);
+        {{'error', _E}, _} ->
+            lager:debug("error getting conn: ~p", [_E]),
+            get_node_connections(Host, Port, User, Pass, AdminPort, Retries+1);
+        {_, {'error', _E}} ->
+            lager:debug("error getting admin conn: ~p", [_E]),
             get_node_connections(Host, Port, User, Pass, AdminPort, Retries+1);
         {_Conn, _AdminConn}=Conns -> Conns
     catch
@@ -1353,6 +1482,7 @@ compact_automatically() ->
     catch _:_ -> Default
     end.
 
+-spec compact_automatically(boolean()) -> 'ok'.
 compact_automatically(Boolean) ->
     _ = (catch whapps_config:set(?CONFIG_CAT, <<"compact_automatically">>, Boolean)),
     CacheProps = [{'expires', 'infinity'}
@@ -1360,7 +1490,10 @@ compact_automatically(Boolean) ->
                  ],
     wh_cache:store_local(?WH_COUCH_CACHE, <<"compact_automatically">>, Boolean, CacheProps).
 
-should_compact(_Conn, _Encoded, ?HEUR_NONE) -> 'true';
+-spec should_compact(server(), ne_binary(), ?HEUR_NONE | ?HEUR_RATIO) -> boolean().
+should_compact(_Conn, _Encoded, ?HEUR_NONE) ->
+    lager:debug("no heur, true"),
+    'true';
 should_compact(Conn, Encoded, ?HEUR_RATIO) ->
     case get_db_disk_and_data(Conn, Encoded) of
         {Disk, Data} -> should_compact_ratio(Disk, Data);
@@ -1377,6 +1510,7 @@ get_db_disk_and_data(_Conn, _Encoded, N) when N >= 3 ->
     lager:warning("getting db info for ~s failed ~b times", [_Encoded, N]),
     'undefined';
 get_db_disk_and_data(Conn, Encoded, N) ->
+    lager:debug("getting db info attempt ~p", [N]),
     case couch_util:db_info(Conn, Encoded) of
         {'ok', Info} ->
             {wh_json:get_integer_value(<<"disk_size">>, Info)
@@ -1397,9 +1531,11 @@ get_db_disk_and_data(Conn, Encoded, N) ->
             'undefined'
     end.
 
+-spec should_compact_ratio(integer(), integer()) -> boolean().
 should_compact_ratio(Disk, Data) ->
     min_data_met(Data, ?MIN_DATA) andalso min_ratio_met(Disk, Data, ?MIN_RATIO).
 
+-spec min_data_met(integer(), integer()) -> boolean().
 min_data_met(Data, Min) when Data > Min ->
     lager:debug("data size ~b is larger than minimum ~b", [Data, Min]),
     'true';
@@ -1407,6 +1543,7 @@ min_data_met(_Data, _Min) ->
     lager:debug("data size ~b is under min_data_size threshold ~b", [_Data, _Min]),
     'false'.
 
+-spec min_ratio_met(integer(), integer(), float()) -> boolean().
 min_ratio_met(Disk, Data, MinRatio) ->
     case Disk / Data of
         R when R > MinRatio ->

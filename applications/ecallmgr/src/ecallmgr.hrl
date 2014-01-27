@@ -95,6 +95,7 @@
                      ,switch_hostname :: api_binary() | '_'
                      ,switch_url :: api_binary() | '_'
                      ,switch_external_ip :: api_binary() | '_'
+                     ,account_id :: api_binary() | '_'
                     }).
 
 -type conference() :: #conference{}.
@@ -191,7 +192,7 @@
                                ,{<<"Ignore-Display-Updates">>, <<"ignore_display_updates">>}
                                ,{<<"Eavesdrop-Group-ID">>, <<"eavesdrop_group">>}
                                ,{<<"Loopback-Bowout">>, <<"loopback_bowout_on_execute">>}
-                               ,{<<"Secure-RTP">>, <<"sip_secure_media">>}
+                               ,{<<"Secure-RTP">>, <<"zrtp_secure_media">>}
                                ,{<<"Ignore-Completed-Elsewhere">>, <<"ignore_completed_elsewhere">>}
                                ,{<<"tts_engine">>, <<"tts_engine">>}
                                ,{<<"tts_voice">>, <<"tts_voice">>}

@@ -9,15 +9,13 @@
 %%%-------------------------------------------------------------------
 -module(whapps_maintenance).
 
--include_lib("whistle/include/wh_databases.hrl").
--include_lib("whistle/include/wh_log.hrl").
--include_lib("whistle/include/wh_types.hrl").
+-include("whistle_apps.hrl").
 
 -export([migrate/0]).
 -export([find_invalid_acccount_dbs/0]).
 -export([refresh/0, refresh/1]).
 -export([blocking_refresh/0]).
--export([purge_doc_type/2]).
+-export([purge_doc_type/2, purge_doc_type/3]).
 -export([cleanup_aggregated_account/1]).
 -export([migrate_limits/0, migrate_limits/1]).
 -export([migrate_media/0, migrate_media/1]).
@@ -77,8 +75,9 @@ migrate() ->
     WhappsUpdates = [fun(L) -> [<<"sysconf">> | lists:delete(<<"sysconf">>, L)] end
                      ,fun(L) -> [<<"acdc">> | lists:delete(<<"acdc">>, L)] end
                      ,fun(L) -> [<<"reorder">> | lists:delete(<<"reorder">>, L)] end
+                     ,fun(L) -> [<<"omnipresence">> | lists:delete(<<"omnipresence">>, L)] end
                     ],
-    StartWhapps = whapps_config:get(<<"whapps_controller">>, <<"whapps">>, []),
+    StartWhapps = whapps_config:get(<<"whapps_controller">>, <<"whapps">>, ?DEFAULT_WHAPPS),
     _ = whapps_config:set_default(<<"whapps_controller">>
                                   ,<<"whapps">>
                                   ,lists:foldr(fun(F, L) -> F(L) end, StartWhapps, WhappsUpdates)
@@ -143,6 +142,7 @@ do_refresh() ->
     refresh(?WH_RATES_DB),
     refresh(?WH_ANONYMOUS_CDR_DB),
     refresh(?WH_SERVICES_DB),
+    refresh(?KZ_PORT_REQUESTS_DB),
 
     Views = [whapps_util:get_view_json('whistle_apps', ?MAINTENANCE_VIEW_FILE)
              ,whapps_util:get_view_json('conference', <<"views/conference.json">>)
@@ -212,6 +212,10 @@ refresh(?WH_FAXES) ->
     couch_mgr:db_create(?WH_FAXES),
     _ = couch_mgr:revise_doc_from_file(?WH_FAXES, 'whistle_apps', ?FAXES_VIEW_FILE),
     'ok';
+refresh(?KZ_PORT_REQUESTS_DB) ->
+    couch_mgr:db_create(?KZ_PORT_REQUESTS_DB),
+    _ = couch_mgr:revise_doc_from_file(?KZ_PORT_REQUESTS_DB, 'crossbar', <<"views/port_requests.json">>),
+    'ok';
 refresh(Account) when is_binary(Account) ->
     refresh(Account, get_all_account_views());
 refresh(Database) ->
@@ -225,6 +229,9 @@ refresh(Account, Views) ->
     _ = couch_mgr:del_doc(AccountDb, <<"_design/limits">>),
     _ = couch_mgr:del_doc(AccountDb, <<"_design/sub_account_reps">>),
 
+    %% Update MOD Views
+    _ = refresh_account_mods(AccountDb),
+    
     case couch_mgr:open_doc(AccountDb, AccountId) of
         {'error', 'not_found'} ->
             _ = refresh_from_accounts_db(AccountDb, AccountId),
@@ -239,12 +246,23 @@ refresh_account_db(AccountDb, AccountId, Views, JObj) ->
 
     _ = case couch_mgr:get_results(AccountDb, ?DEVICES_CB_LIST, ['include_docs']) of
             {'ok', Devices} ->
-                _ = refresh_account_devices(AccountDb, AccountRealm, Devices),
-                remove_aggregate_devices(AccountDb, AccountRealm, Devices);
+                _ = remove_aggregate_devices(AccountDb, AccountRealm, Devices),
+                refresh_account_devices(AccountDb, AccountRealm, Devices);
             {'error', _} -> 'ok'
         end,
     io:format("    updating views in ~s~n", [AccountDb]),
     whapps_util:update_views(AccountDb, Views, 'true').
+
+refresh_account_mods(AccountDb) ->
+    Views = get_all_account_mod_views(),
+    MODs = whapps_util:get_account_mods(AccountDb),
+    [refresh_account_mod(AccountMOD, Views) 
+     || AccountMOD <- MODs
+    ].
+
+refresh_account_mod(AccountMOD, Views) ->
+    io:format("    updating views in mod ~s~n", [AccountMOD]),
+    whapps_util:update_views(AccountMOD, Views).
 
 refresh_account_devices(AccountDb, AccountRealm, Devices) ->
     [whapps_util:add_aggregate_device(AccountDb, wh_json:get_value(<<"doc">>, Device))
@@ -257,7 +275,7 @@ remove_aggregate_devices(AccountDb, AccountRealm, Devices) ->
     [whapps_util:rm_aggregate_device(AccountDb, wh_json:get_value(<<"doc">>, Device))
      || Device <- Devices,
         wh_json:get_ne_value([<<"doc">>, <<"sip">>, <<"realm">>], Device, AccountRealm) =:= AccountRealm
-            orelse wh_json:get_ne_value([<<"doc">>, <<"sip">>, <<"ip">>], Device, 'undefined') =:= 'undefined'
+            andalso wh_json:get_ne_value([<<"doc">>, <<"sip">>, <<"ip">>], Device, 'undefined') =:= 'undefined'
     ].
 
 refresh_from_accounts_db(AccountDb, AccountId) ->
@@ -326,23 +344,31 @@ cleanup_aggregated_device(Device) ->
                             {'ok', wh_json:objects()} |
                             {'error', term()} |
                             'ok'.
+-spec purge_doc_type(ne_binaries() | ne_binary(), ne_binary(), integer()) ->
+                            {'ok', wh_json:objects()} |
+                            {'error', term()} |
+                            'ok'.
 purge_doc_type([], _Account) -> 'ok';
 purge_doc_type([Type|Types], Account) ->
     _ = purge_doc_type(Type, Account),
-    purge_doc_type(Types, Account);
+    purge_doc_type(Types, Account, whapps_config:get_integer(<<"whistle_couch">>, <<"default_chunk_size">>, 1000));
 purge_doc_type(Type, Account) when not is_binary(Type) ->
-    purge_doc_type(wh_util:to_binary(Type), Account);
+    purge_doc_type(wh_util:to_binary(Type), Account, whapps_config:get_integer(<<"whistle_couch">>, <<"default_chunk_size">>, 1000));
 purge_doc_type(Type, Account) when not is_binary(Account) ->
-    purge_doc_type(Type, wh_util:to_binary(Account));
-purge_doc_type(Type, Account) ->
+    purge_doc_type(Type, wh_util:to_binary(Account), whapps_config:get_integer(<<"whistle_couch">>, <<"default_chunk_size">>, 1000)).
+purge_doc_type(Type, Account, ChunkSize) ->
     Db = wh_util:format_account_id(Account, 'encoded'),
     Opts = [{'key', Type}
-            ,'include_docs'
+           ,{'limit', ChunkSize}
+           ,'include_docs'
            ],
     case couch_mgr:get_results(Db, <<"maintenance/listing_by_type">>, Opts) of
         {'error', _}=E -> E;
+        {'ok', []} -> 'ok';
         {'ok', Ds} ->
-            couch_mgr:del_docs(Db, [wh_json:get_value(<<"doc">>, D) || D <- Ds])
+            lager:debug('deleting up to ~p documents of type ~p', [ChunkSize, Type]),
+            couch_mgr:del_docs(Db, [wh_json:get_value(<<"doc">>, D) || D <- Ds]),
+            purge_doc_type(Type, Account, ChunkSize)
     end.
 
 %%--------------------------------------------------------------------
@@ -683,6 +709,15 @@ get_all_account_views() ->
      |whapps_util:get_views_json('crossbar', "account")
      ++ whapps_util:get_views_json('callflow', "views")
     ].
+
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%%
+%% @end
+%%--------------------------------------------------------------------
+get_all_account_mod_views() ->
+    [whapps_util:get_view_json('crossbar', <<"account/cdrs.json">>)].
 
 -spec call_id_status(ne_binary()) -> 'ok'.
 -spec call_id_status(ne_binary(), boolean() | ne_binary()) -> 'ok'.

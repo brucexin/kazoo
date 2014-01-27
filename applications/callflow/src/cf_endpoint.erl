@@ -100,12 +100,12 @@ maybe_cached_hotdesk_ids(Props, JObj, AccountDb) ->
 
 -spec merge_attributes(wh_json:object()) -> wh_json:object().
 merge_attributes(Endpoint) ->
-    Keys = [<<"call_restriction">>
+    Keys = [<<"name">>
+            ,<<"call_restriction">>
             ,<<"music_on_hold">>
             ,<<"ringtones">>
             ,<<"caller_id">>
             ,<<"caller_id_options">>
-            ,<<"name">>
             ,<<"do_not_disturb">>
             ,<<"call_forward">>
             ,?CF_ATTR_LOWER_KEY
@@ -150,11 +150,10 @@ merge_attributes([?CF_ATTR_LOWER_KEY|Keys], Account, Endpoint, Owner) ->
             merge_attributes(Keys, Account, Update, Owner)
     end;
 merge_attributes([<<"name">> = Key|Keys], Account, Endpoint, Owner) ->
-    AccountName = wh_json:get_ne_value(Key, Account),
-    EndpointName = wh_json:get_ne_value(Key, Endpoint),
-    FirstName = wh_json:get_ne_value(<<"first_name">>, Owner),
-    LastName = wh_json:get_ne_value(<<"last_name">>, Owner),
-    Name = create_endpoint_name(FirstName, LastName, EndpointName, AccountName),
+    Name = create_endpoint_name(wh_json:get_ne_value(<<"first_name">>, Owner)
+                                ,wh_json:get_ne_value(<<"last_name">>, Owner)
+                                ,wh_json:get_ne_value(Key, Endpoint)
+                                ,wh_json:get_ne_value(Key, Account)),
     merge_attributes(Keys, Account, wh_json:set_value(Key, Name, Endpoint), Owner);
 merge_attributes([<<"call_forward">> = Key|Keys], Account, Endpoint, Owner) ->
     EndpointAttr = wh_json:get_ne_value(Key, Endpoint, wh_json:new()),
@@ -163,30 +162,42 @@ merge_attributes([<<"call_forward">> = Key|Keys], Account, Endpoint, Owner) ->
         'false' ->
             AccountAttr = wh_json:get_ne_value(Key, Account, wh_json:new()),
             OwnerAttr = wh_json:get_ne_value(Key, Owner, wh_json:new()),
-            Merged1 = wh_json:merge_recursive(AccountAttr, EndpointAttr),
-            Merged2 = wh_json:merge_recursive(Merged1, OwnerAttr),
-            merge_attributes(Keys, Account, wh_json:set_value(Key, Merged2, Endpoint), Owner)
+            Merged = wh_json:merge_recursive([AccountAttr, EndpointAttr, OwnerAttr]),
+            merge_attributes(Keys, Account, wh_json:set_value(Key, Merged, Endpoint), Owner)
     end;
 merge_attributes([<<"caller_id">> = Key|Keys], Account, Endpoint, Owner) ->
     AccountAttr = wh_json:get_ne_value(Key, Account, wh_json:new()),
     EndpointAttr = wh_json:get_ne_value(Key, Endpoint, wh_json:new()),
-    OwnerAttr = wh_json:get_ne_value(Key, Owner, wh_json:new()),
-    Merged1 = wh_json:merge_recursive(AccountAttr, EndpointAttr),
-    Merged2 = wh_json:merge_recursive(Merged1, OwnerAttr),
+    OwnerAttr = caller_id_owner_attr(Owner),
+    Merged = wh_json:merge_recursive([AccountAttr, EndpointAttr, OwnerAttr]
+                                     ,fun(_, V) -> wh_util:is_not_empty(V) end),
     case wh_json:get_ne_value([<<"emergency">>, <<"number">>], EndpointAttr) of
         'undefined' ->
-            merge_attributes(Keys, Account, wh_json:set_value(Key, Merged2, Endpoint), Owner);
+            merge_attributes(Keys, Account, wh_json:set_value(Key, Merged, Endpoint), Owner);
         Number ->
-            Merged3 = wh_json:set_value([<<"emergency">>, <<"number">>], Number, Merged2),
-            merge_attributes(Keys, Account, wh_json:set_value(Key, Merged3, Endpoint), Owner)
+            CallerId = wh_json:set_value([<<"emergency">>, <<"number">>], Number, Merged),
+            merge_attributes(Keys, Account, wh_json:set_value(Key, CallerId, Endpoint), Owner)
     end;
 merge_attributes([Key|Keys], Account, Endpoint, Owner) ->
     AccountAttr = wh_json:get_ne_value(Key, Account, wh_json:new()),
     EndpointAttr = wh_json:get_ne_value(Key, Endpoint, wh_json:new()),
     OwnerAttr = wh_json:get_ne_value(Key, Owner, wh_json:new()),
-    Merged1 = wh_json:merge_recursive(AccountAttr, OwnerAttr),
-    Merged2 = wh_json:merge_recursive(Merged1, EndpointAttr),
-    merge_attributes(Keys, Account, wh_json:set_value(Key, Merged2, Endpoint), Owner).
+    Merged = wh_json:merge_recursive([AccountAttr, EndpointAttr, OwnerAttr]
+                                     ,fun(_, V) -> wh_util:is_not_empty(V) end),
+    merge_attributes(Keys, Account, wh_json:set_value(Key, Merged, Endpoint), Owner).
+
+-spec caller_id_owner_attr(wh_json:object()) -> wh_json:object().
+caller_id_owner_attr(Owner) ->
+    OwnerAttr = wh_json:get_ne_value(<<"caller_id">>, Owner, wh_json:new()),
+    case wh_json:get_value([<<"internal">>, <<"name">>], OwnerAttr) of
+        'undefined' ->
+            Name = create_endpoint_name(wh_json:get_ne_value(<<"first_name">>, Owner)
+                                        ,wh_json:get_ne_value(<<"last_name">>, Owner)
+                                        ,'undefined'
+                                        ,'undefined'),
+            wh_json:set_value([<<"internal">>, <<"name">>], Name, OwnerAttr);
+        _Else -> OwnerAttr
+    end.
 
 -spec merge_call_restrictions(ne_binaries(), wh_json:object(), wh_json:object(), wh_json:object()) -> wh_json:object().
 merge_call_restrictions([], _, Endpoint, _) -> Endpoint;
@@ -490,7 +501,7 @@ create_endpoints(Endpoint, Properties, Call) ->
                                        wh_json:objects().
 try_create_endpoint(Routine, Endpoints, Endpoint, Properties, Call) when is_function(Routine, 3) ->
     try Routine(Endpoint, Properties, Call) of
-        {'error', _R} -> 
+        {'error', _R} ->
             lager:warning("failed to create endpoint: ~p", [_R]),
             Endpoints;
         JObj -> [JObj|Endpoints]
@@ -557,7 +568,7 @@ guess_endpoint_type(Endpoint, [Type|Types]) ->
         'undefined' -> guess_endpoint_type(Endpoint, Types);
         _ -> Type
     end;
-guess_endpoint_type(Endpoint, []) -> 
+guess_endpoint_type(Endpoint, []) ->
     case wh_json:get_ne_value(<<"sip">>, Endpoint) of
         'undefined' -> <<"unknown">>;
         _Else -> <<"sip">>
@@ -571,32 +582,40 @@ guess_endpoint_type(Endpoint, []) ->
 %% device) and the properties of this endpoint in the callflow.
 %% @end
 %%--------------------------------------------------------------------
+-record(clid, {caller_number :: api_binary()
+               ,caller_name :: api_binary()
+               ,callee_name :: api_binary()
+               ,callee_number :: api_binary()
+              }).
+-type clid() :: #clid{}.
+
+-spec get_clid(wh_json:object(), wh_json:object(), whapps_call:call()) -> clid().
+get_clid(Endpoint, Properties, Call) ->
+    case wh_json:is_true(<<"suppress_clid">>, Properties) of
+        'true' -> #clid{};
+        'false' ->
+            {InternalNumber, InternalName} = cf_attributes:caller_id(<<"internal">>, Call),
+            CallerNumber = case whapps_call:caller_id_number(Call) of
+                               InternalNumber -> 'undefined';
+                               _Number -> InternalNumber
+                           end,
+            CallerName = case whapps_call:caller_id_name(Call) of
+                             InternalName -> 'undefined';
+                             _Name -> InternalName
+                         end,
+            {CalleeNumber, CalleeName} = cf_attributes:callee_id(Endpoint, Call),
+            #clid{caller_number=CallerNumber
+                  ,caller_name=CallerName
+                  ,callee_number=CalleeNumber
+                  ,callee_name=CalleeName
+                 }
+    end.
+
 -spec create_sip_endpoint(wh_json:object(), wh_json:object(), whapps_call:call()) ->
                                  wh_json:object().
 create_sip_endpoint(Endpoint, Properties, Call) ->
-    CIDName = whapps_call:caller_id_name(Call),
-    CIDNum = whapps_call:caller_id_number(Call),
-
-    {CalleeNum, CalleeName} = cf_attributes:callee_id(Endpoint, Call),
-
-    {IntCIDNumber, IntCIDName} =
-        case cf_attributes:caller_id(<<"internal">>, Call) of
-            %% if both the internal name and number are the same as the current
-            %% caller id then leave it alone
-            {CIDNum, CIDName} -> {'undefined', 'undefined'};
-            %% if both the internal name is the same as the current
-            %% caller id then leave it alone
-            {AltCIDNum, CIDName} -> {AltCIDNum, 'undefined'};
-            %% if both the internal number is the same as the current
-            %% caller id then leave it alone
-            {CIDNum, AltCIDName} -> {'undefined', AltCIDName};
-            %% if both the internal number and name are different, use them!
-            {AltCIDNum, AltCIDName} -> {AltCIDNum, AltCIDName}
-        end,
-
-    OutgoingCIDNum = maybe_format_caller_id_number(Endpoint, IntCIDNumber, Call),
+    Clid= get_clid(Endpoint, Properties, Call),
     SIPJObj = wh_json:get_value(<<"sip">>, Endpoint),
-
     Prop =
         [{<<"Invite-Format">>, get_invite_format(SIPJObj)}
          ,{<<"To-User">>, get_to_user(SIPJObj, Properties)}
@@ -604,15 +623,16 @@ create_sip_endpoint(Endpoint, Properties, Call) ->
          ,{<<"To-Realm">>, cf_util:get_sip_realm(Endpoint, whapps_call:account_id(Call))}
          ,{<<"To-DID">>, get_to_did(Endpoint, Call)}
          ,{<<"To-IP">>, wh_json:get_value(<<"ip">>, SIPJObj)}
+         ,{<<"SIP-Transport">>, get_sip_transport(SIPJObj)}
          ,{<<"Route">>, wh_json:get_value(<<"route">>, SIPJObj)}
          ,{<<"Proxy-IP">>, wh_json:get_value(<<"proxy">>, SIPJObj)}
          ,{<<"Forward-IP">>, wh_json:get_value(<<"forward">>, SIPJObj)}
-         ,{<<"Callee-ID-Name">>, CalleeName}
-         ,{<<"Callee-ID-Number">>, CalleeNum}
-         ,{<<"Outbound-Callee-ID-Name">>, CalleeName}
-         ,{<<"Outbound-Callee-ID-Number">>, CalleeNum}
-         ,{<<"Outbound-Caller-ID-Number">>, OutgoingCIDNum}
-         ,{<<"Outbound-Caller-ID-Name">>, IntCIDName}
+         ,{<<"Callee-ID-Name">>, Clid#clid.callee_name}
+         ,{<<"Callee-ID-Number">>, Clid#clid.callee_number}
+         ,{<<"Outbound-Callee-ID-Name">>, Clid#clid.callee_name}
+         ,{<<"Outbound-Callee-ID-Number">>, Clid#clid.callee_number}
+         ,{<<"Outbound-Caller-ID-Number">>, Clid#clid.caller_number}
+         ,{<<"Outbound-Caller-ID-Name">>, Clid#clid.caller_name}
          ,{<<"Ignore-Early-Media">>, get_ignore_early_media(Endpoint)}
          ,{<<"Bypass-Media">>, get_bypass_media(Endpoint)}
          ,{<<"Endpoint-Progress-Timeout">>, get_progress_timeout(Endpoint)}
@@ -629,6 +649,26 @@ create_sip_endpoint(Endpoint, Properties, Call) ->
          ,{<<"Ignore-Completed-Elsewhere">>, wh_json:is_true(<<"ignore_complete_elsewhere">>, Endpoint)}
         ],
     wh_json:from_list(props:filter_undefined(Prop)).
+
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% @end
+%%--------------------------------------------------------------------
+-spec get_sip_transport(wh_json:object()) -> ne_binary() | 'undefined'.
+get_sip_transport(SIPJObj) ->
+    case validate_sip_transport(wh_json:get_value(<<"transport">>, SIPJObj)) of
+        'undefined' ->
+            validate_sip_transport(whapps_config:get(?CF_CONFIG_CAT, <<"sip_transport">>));
+        Transport -> Transport
+    end.
+
+-spec validate_sip_transport(any()) -> ne_binary() | 'undefined'.
+validate_sip_transport(<<"tcp">>) -> <<"tcp">>;
+validate_sip_transport(<<"udp">>) -> <<"udp">>;
+validate_sip_transport(<<"tls">>) -> <<"tls">>;
+validate_sip_transport(<<"sctp">>) -> <<"sctp">>;
+validate_sip_transport(_) -> 'undefined'.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -789,14 +829,14 @@ generate_ccvs(Endpoint, Call, CallFwd) ->
                             _Else -> J
                         end
                 end
-               ,fun(J) -> 
+               ,fun(J) ->
                         case wh_json:is_true([<<"media">>, <<"secure_rtp">>], Endpoint) of
                             'false' -> J;
                             'true' ->
                                 wh_json:set_value(<<"Secure-RTP">>, <<"true">>, J)
                         end
                 end
-               ,fun(J) -> 
+               ,fun(J) ->
                         case wh_json:is_true([<<"sip">>, <<"ignore_completed_elsewhere">>], Endpoint) of
                             'false' -> J;
                             'true' ->
@@ -886,28 +926,3 @@ get_force_fax(JObj) ->
         'false' -> 'undefined';
         'true' -> <<"self">>
     end.
-
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Conditionally formats the caller id number
-%% @end
-%%--------------------------------------------------------------------
--spec maybe_format_caller_id_number(wh_json:object(), ne_binary(), whapps_call:call()) -> ne_binary().
-maybe_format_caller_id_number(_Endpoint, CIDNum, _Call) ->
-%% TODO: MOVE FROM CF_ATTRIBUTES
-    CIDNum.
-%%    case cf_attributes:caller_id_attributes(Endpoint, <<"format">>, Call) of
-%%        'undefined' -> CIDNum;
-%%        FormatObj ->
-%%            case wh_json:is_json_object(FormatObj) of
-%%                false -> CIDNum;
-%%                true -> wh_json:foldl(fun(Key, Value, CIDNum1) ->
-%%                                              format_caller_id_number_flag(Key, Value, CIDNum1)
-%%                                      end, CIDNum, FormatObj)
-%%            end
-%%    end.
-%%
-%%-spec format_caller_id_number_flag(ne_binary(), term(), ne_binary()) -> ne_binary().
-%%format_caller_id_number_flag(<<"remove_plus">>, true, <<$+, CIDNum/binary>>) -> CIDNum;
-%%format_caller_id_number_flag(_Key, _Value, CIDNum) -> CIDNum.

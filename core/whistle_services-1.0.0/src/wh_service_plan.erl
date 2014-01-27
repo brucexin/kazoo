@@ -40,7 +40,16 @@ fetch(PlanId, VendorId, Overrides) ->
 %%--------------------------------------------------------------------
 -spec activation_charges(ne_binary(), ne_binary(), wh_json:object()) -> float().
 activation_charges(Category, Item, ServicePlan) ->
-    wh_json:get_float_value([<<"plan">>, Category, Item, <<"activation_charge">>], ServicePlan, 0.0).
+    Keys = [<<"plan">>, Category, Item, <<"activation_charge">>],
+    case wh_json:get_value(Keys, ServicePlan) of
+        'undefined' ->
+            wh_json:get_float_value([<<"plan">>
+                                     ,Category
+                                     ,<<"_all">>
+                                     ,<<"activation_charge">>
+                                    ], ServicePlan, 0.0);
+        Else -> wh_util:to_float(Else)
+    end.
 
 %%--------------------------------------------------------------------
 %% @public
@@ -48,8 +57,10 @@ activation_charges(Category, Item, ServicePlan) ->
 %%
 %% @end
 %%--------------------------------------------------------------------
--spec create_items(wh_json:object(), wh_service_items:items(), wh_services:services()) -> wh_service_items:items().
--spec create_items(ne_binary(), ne_binary(), wh_json:object(), wh_service_items:items(), wh_services:services()) -> wh_service_items:items().
+-spec create_items(wh_json:object(), wh_service_items:items(), wh_services:services()) ->
+                          wh_service_items:items().
+-spec create_items(ne_binary(), ne_binary(), wh_service_items:items(), wh_json:object(), wh_services:services()) ->
+                          wh_service_items:items().
 
 create_items(ServicePlan, ServiceItems, Services) ->
     Plan = wh_json:get_value(<<"plan">>, ServicePlan, wh_json:new()),
@@ -122,7 +133,8 @@ bookkeeper_jobj(Category, Item, ServicePlan) ->
 %%
 %% @end
 %%--------------------------------------------------------------------
--spec get_rate_at_quantity(ne_binary(), ne_binary(), wh_json:object(), wh_services:services()) -> {float(), integer()}.
+-spec get_rate_at_quantity(ne_binary(), ne_binary(), wh_json:object(), wh_services:services()) ->
+                                  {float(), integer()}.
 get_rate_at_quantity(Category, Item, ItemPlan, Services) ->
     Quantity = get_quantity(Category, Item, ItemPlan, Services),
     case get_flat_rate(Quantity, ItemPlan) of
@@ -161,7 +173,7 @@ get_flat_rate(Quantity, JObj) ->
     case lists:dropwhile(fun(K) -> Quantity > K end, lists:sort(L1)) of
         [] -> 'undefined';
         Range ->
-            lager:debug("using flat rates", []),
+            lager:debug("using flat rates"),
             wh_json:get_float_value(wh_util:to_binary(hd(Range)), Rates)
     end.
 
@@ -172,7 +184,7 @@ get_flat_rate(Quantity, JObj) ->
 %% quantity.  If no rates are viable attempt to use the "rate" property.
 %% @end
 %%--------------------------------------------------------------------
--spec get_quantity_rate(non_neg_integer(), wh_json:object()) -> float().
+-spec get_quantity_rate(non_neg_integer(), wh_json:object()) -> api_float().
 get_quantity_rate(Quantity, JObj) ->
     Rates = wh_json:get_value(<<"rates">>, JObj, wh_json:new()),
     L1 = [wh_util:to_integer(K) || K <- wh_json:get_keys(Rates)],

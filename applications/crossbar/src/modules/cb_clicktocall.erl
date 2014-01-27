@@ -40,14 +40,14 @@
 %%% API
 %%%===================================================================
 init() ->
-    _ = crossbar_bindings:bind(<<"v1_resource.allowed_methods.clicktocall">>, ?MODULE, allowed_methods),
-    _ = crossbar_bindings:bind(<<"v1_resource.resource_exists.clicktocall">>, ?MODULE, resource_exists),
-    _ = crossbar_bindings:bind(<<"v1_resource.authenticate">>, ?MODULE, authenticate),
-    _ = crossbar_bindings:bind(<<"v1_resource.authorize">>, ?MODULE, authorize),
-    _ = crossbar_bindings:bind(<<"v1_resource.validate.clicktocall">>, ?MODULE, validate),
-    _ = crossbar_bindings:bind(<<"v1_resource.execute.put.clicktocall">>, ?MODULE, put),
-    _ = crossbar_bindings:bind(<<"v1_resource.execute.post.clicktocall">>, ?MODULE, post),
-    crossbar_bindings:bind(<<"v1_resource.execute.delete.clicktocall">>, ?MODULE, delete).
+    _ = crossbar_bindings:bind(<<"*.allowed_methods.clicktocall">>, ?MODULE, allowed_methods),
+    _ = crossbar_bindings:bind(<<"*.resource_exists.clicktocall">>, ?MODULE, resource_exists),
+    _ = crossbar_bindings:bind(<<"*.authenticate">>, ?MODULE, authenticate),
+    _ = crossbar_bindings:bind(<<"*.authorize">>, ?MODULE, authorize),
+    _ = crossbar_bindings:bind(<<"*.validate.clicktocall">>, ?MODULE, validate),
+    _ = crossbar_bindings:bind(<<"*.execute.put.clicktocall">>, ?MODULE, put),
+    _ = crossbar_bindings:bind(<<"*.execute.post.clicktocall">>, ?MODULE, post),
+    crossbar_bindings:bind(<<"*.execute.delete.clicktocall">>, ?MODULE, delete).
 
 %%--------------------------------------------------------------------
 %% @public
@@ -259,7 +259,7 @@ originate_call(Contact, JObj, AccountId) ->
                ,{<<"Outbound-Caller-ID-Number">>, Contact}
                ,{<<"Ringback">>, wh_json:get_value(<<"Ringback">>, JObj)}
                ,{<<"Dial-Endpoint-Method">>, <<"single">>}
-               ,{<<"Continue-On-Fail">>, <<"true">>}
+               ,{<<"Continue-On-Fail">>, 'true'}
                ,{<<"SIP-Headers">>, wh_json:get_value(<<"SIP-Headers">>, JObj)}
                ,{<<"Custom-Channel-Vars">>, wh_json:from_list(CCVs)}
                ,{<<"Export-Custom-Channel-Vars">>, [<<"Account-ID">>, <<"Retain-CID">>, <<"Authorizing-ID">>, <<"Authorizing-Type">>]}

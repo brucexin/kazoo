@@ -85,7 +85,7 @@
          ,command_q = queue:new() :: queue()
          ,current_app :: api_binary()
          ,current_cmd :: api_object()
-         ,start_time = erlang:now() :: wh_now()
+         ,start_time = os:timestamp() :: wh_now()
          ,is_call_up = 'true' :: boolean()
          ,is_node_up = 'true' :: boolean()
          ,keep_alive_ref :: api_reference()
@@ -124,7 +124,7 @@
 %% @spec start_link() -> {ok, Pid} | ignore | {error, Error}
 %% @end
 %%--------------------------------------------------------------------
--spec start_link(atom(), ne_binary(), api_binary(), api_binary(), wh_json:new()) -> startlink_ret().
+-spec start_link(atom(), ne_binary(), api_binary(), api_binary(), wh_json:object()) -> startlink_ret().
 start_link(Node, CallId, FetchId, ControllerQ, CCVs) ->
     %% We need to become completely decoupled from ecallmgr_call_events
     %% because the call_events process might have been spun up with A->B
@@ -234,7 +234,7 @@ init([Node, CallId, FetchId, ControllerQ, CCVs]) ->
     {'ok', #state{node=Node
                   ,callid=CallId
                   ,command_q=queue:new()
-                  ,start_time=erlang:now()
+                  ,start_time=os:timestamp()
                   ,fetch_id=FetchId
                   ,controller_q=ControllerQ
                   ,initial_ccvs=CCVs
@@ -611,7 +611,7 @@ terminate(_Reason, #state{start_time=StartTime
                          }) ->
     catch (erlang:cancel_timer(SCTRef)),
     catch (erlang:cancel_timer(KATRef)),
-    lager:debug("control queue was up for ~p microseconds", [timer:now_diff(erlang:now(), StartTime)]),
+    lager:debug("control queue was up for ~p microseconds", [timer:now_diff(os:timestamp(), StartTime)]),
     'ok'.
 
 %%--------------------------------------------------------------------
@@ -669,7 +669,10 @@ handle_event_execute_complete(AppName, JObj, #state{current_app=CurrApp}=State) 
 -spec handle_sofia_replaced(ne_binary(), state()) -> state().
 handle_sofia_replaced(CallId, #state{callid=CallId}=State) ->
     State;
-handle_sofia_replaced(ReplacedBy, #state{callid=CallId, node=Node, other_legs=Legs}=State) ->
+handle_sofia_replaced(ReplacedBy, #state{callid=CallId
+                                         ,node=Node
+                                         ,other_legs=Legs
+                                         ,command_q=CommandQ}=State) ->
     lager:info("updating callid from ~s to ~s", [CallId, ReplacedBy]),
     unbind_from_events(Node, CallId),
     gen_listener:rm_binding(self(), 'call', [{'callid', CallId}]),
@@ -679,8 +682,12 @@ handle_sofia_replaced(ReplacedBy, #state{callid=CallId, node=Node, other_legs=Le
     lager:debug("ensuring event listener exists"),
     _ = ecallmgr_call_sup:start_event_process(Node, ReplacedBy),
     lager:info("...call id updated, continuing post-transfer"),
+    Commands = [wh_json:set_value(<<"Call-ID">>, ReplacedBy, JObj)
+                || JObj <- queue:to_list(CommandQ)
+               ],
     State#state{callid=ReplacedBy
                 ,other_legs=lists:delete(ReplacedBy, Legs)
+                ,command_q=queue:from_list(Commands)
                }.
 
 -spec handle_channel_create(wh_proplist(), atom(), ne_binary()) -> 'ok'.
@@ -750,7 +757,7 @@ insert_command(#state{node=Node
         'false' ->
             lager:debug("node ~s is not avaliable", [Node]),
             lager:debug("sending execution error for command ~s", [AName]),
-            {Mega,Sec,Micro} = erlang:now(),
+            {Mega,Sec,Micro} = os:timestamp(),
             Props = [{<<"Event-Name">>, <<"CHANNEL_EXECUTE_ERROR">>}
                      ,{<<"Event-Date-Timestamp">>, ( (Mega * 1000000 + Sec) * 1000000 + Micro )}
                      ,{<<"Call-ID">>, CallId}

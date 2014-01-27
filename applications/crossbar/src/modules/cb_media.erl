@@ -45,15 +45,15 @@
 %%% API
 %%%===================================================================
 init() ->
-    _ = crossbar_bindings:bind(<<"v1_resource.content_types_provided.media">>, ?MODULE, 'content_types_provided'),
-    _ = crossbar_bindings:bind(<<"v1_resource.content_types_accepted.media">>, ?MODULE, 'content_types_accepted'),
-    _ = crossbar_bindings:bind(<<"v1_resource.allowed_methods.media">>, ?MODULE, 'allowed_methods'),
-    _ = crossbar_bindings:bind(<<"v1_resource.resource_exists.media">>, ?MODULE, 'resource_exists'),
-    _ = crossbar_bindings:bind(<<"v1_resource.validate.media">>, ?MODULE, 'validate'),
-    _ = crossbar_bindings:bind(<<"v1_resource.execute.get.media">>, ?MODULE, 'get'),
-    _ = crossbar_bindings:bind(<<"v1_resource.execute.put.media">>, ?MODULE, 'put'),
-    _ = crossbar_bindings:bind(<<"v1_resource.execute.post.media">>, ?MODULE, 'post'),
-    _ = crossbar_bindings:bind(<<"v1_resource.execute.delete.media">>, ?MODULE, 'delete').
+    _ = crossbar_bindings:bind(<<"*.content_types_provided.media">>, ?MODULE, 'content_types_provided'),
+    _ = crossbar_bindings:bind(<<"*.content_types_accepted.media">>, ?MODULE, 'content_types_accepted'),
+    _ = crossbar_bindings:bind(<<"*.allowed_methods.media">>, ?MODULE, 'allowed_methods'),
+    _ = crossbar_bindings:bind(<<"*.resource_exists.media">>, ?MODULE, 'resource_exists'),
+    _ = crossbar_bindings:bind(<<"*.validate.media">>, ?MODULE, 'validate'),
+    _ = crossbar_bindings:bind(<<"*.execute.get.media">>, ?MODULE, 'get'),
+    _ = crossbar_bindings:bind(<<"*.execute.put.media">>, ?MODULE, 'put'),
+    _ = crossbar_bindings:bind(<<"*.execute.post.media">>, ?MODULE, 'post'),
+    _ = crossbar_bindings:bind(<<"*.execute.delete.media">>, ?MODULE, 'delete').
 
 %%--------------------------------------------------------------------
 %% @public
@@ -184,7 +184,9 @@ put(#cb_context{doc=JObj}=Context) ->
                 ,fun(#cb_context{resp_status='success', doc=J}=C) when TTS ->
                          Voice = wh_json:get_value([<<"tts">>, <<"voice">>], J, <<"female/en-US">>),
                          case whapps_speech:create(Text, Voice) of
-                             {'error', R} -> crossbar_util:response('error', wh_util:to_binary(R), C);
+                             {'error', R} ->
+                                crossbar_doc:delete(C),
+                                crossbar_util:response('error', wh_util:to_binary(R), C);
                              {'ok', ContentType, Content} ->
                                  MediaId = wh_json:get_value(<<"_id">>, J),
                                  Headers = wh_json:from_list([{<<"content_type">>, ContentType}
@@ -242,7 +244,7 @@ post(#cb_context{doc=JObj}=Context, MediaId) ->
                 ,fun(#cb_context{resp_status='success', doc=J1}=C) when TTS ->
                          J2 = wh_json:set_value(<<"media_source">>, <<"tts">>, J1),
                          crossbar_doc:save(C#cb_context{doc=wh_json:set_value(<<"pvt_previous_tts">>, Text, J2)});
-                    (#cb_context{resp_status='success'}=C) -> 
+                    (#cb_context{resp_status='success'}=C) ->
                          crossbar_doc:save(C);
                     (C) -> C
                  end
@@ -283,7 +285,7 @@ load_media_meta(MediaId, Context) ->
 %%--------------------------------------------------------------------
 %% @private
 %% @doc
-%% 
+%%
 %% @end
 %%--------------------------------------------------------------------
 -spec validate_request(api_binary(), cb_context:context()) -> cb_context:context().
@@ -299,7 +301,7 @@ on_successful_validation('undefined', #cb_context{doc=Doc}=Context) ->
              ,{<<"media_source">>, <<"upload">>}
             ],
     Context#cb_context{doc=wh_json:set_values(Props, Doc)};
-on_successful_validation(MediaId, Context) -> 
+on_successful_validation(MediaId, Context) ->
     crossbar_doc:load_merge(MediaId, Context).
 
 %%--------------------------------------------------------------------
@@ -361,8 +363,9 @@ update_media_binary(MediaID, #cb_context{doc=JObj
     _ = [couch_mgr:delete_attachment(Db, Id, Attachment)
          || Attachment <- wh_json:get_keys(OldAttachments)
         ],
-    crossbar_doc:save_attachment(MediaID, attachment_name(Filename, CT), Contents, Context, Opts).
-    
+    crossbar_doc:save_attachment(MediaID, cb_modules_util:attachment_name(Filename, CT)
+                                 , Contents, Context, Opts
+                                ).
 
 %%--------------------------------------------------------------------
 %% @private
@@ -382,42 +385,3 @@ delete_media_binary(MediaID, Context) ->
             end;
         Context1 -> Context1
     end.
-
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Generate an attachment name if one is not provided and ensure
-%% it has an extension (for the associated content type)
-%% @end
-%%--------------------------------------------------------------------
--spec attachment_name(ne_binary(), ne_binary()) -> ne_binary().
-attachment_name(Filename, CT) ->
-    Generators = [fun(A) ->
-                          case wh_util:is_empty(A) of
-                              true -> wh_util:to_hex_binary(crypto:rand_bytes(16));
-                              false -> A
-                          end
-                  end
-                  ,fun(A) ->
-                           case wh_util:is_empty(filename:extension(A)) of
-                               false -> A;
-                               true ->
-                                   <<A/binary, ".", (content_type_to_extension(CT))/binary>>
-                           end
-                   end
-                 ],
-    lists:foldr(fun(F, A) -> F(A) end, Filename, Generators).
-
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Convert known media types to extensions
-%% @end
-%%--------------------------------------------------------------------
--spec content_type_to_extension(ne_binary()) -> ne_binary().
-content_type_to_extension(<<"audio/wav">>) -> <<"wav">>;
-content_type_to_extension(<<"audio/x-wav">>) -> <<"wav">>;
-content_type_to_extension(<<"audio/mpeg">>) -> <<"mp3">>;
-content_type_to_extension(<<"audio/mpeg3">>) -> <<"mp3">>;
-content_type_to_extension(<<"audio/mp3">>) -> <<"mp3">>;
-content_type_to_extension(<<"audio/ogg">>) -> <<"ogg">>.

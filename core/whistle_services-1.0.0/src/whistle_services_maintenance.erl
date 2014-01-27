@@ -107,7 +107,7 @@ reconcile(Account) ->
         Any -> Any
     catch
         _E:_R ->
-            io:format("failed to reconcile account ~s(~p): ~p~n", [Account, _E, _R])
+            io:format("failed to reconcile account ~s(~p):~n  ~p~n", [Account, _E, _R])
     end.
 
 %%--------------------------------------------------------------------

@@ -118,8 +118,12 @@ get_group_members(Member, Id, Call) ->
     case couch_mgr:open_cache_doc(AccountDb, Id) of
         {'ok', JObj} ->
             Endpoints = wh_json:get_ne_value(<<"endpoints">>, JObj, wh_json:new()),
+            DefaultDelay = wh_json:get_value(<<"delay">>, Member),
+            DefaultTimeout = wh_json:get_value(<<"timeout">>, Member),
             [wh_json:set_values([{<<"endpoint_type">>, wh_json:get_value([Key, <<"type">>], Endpoints)}
                                  ,{<<"id">>, Key}
+                                 ,{<<"delay">>, wh_json:get_value([Key, <<"delay">>], Endpoints, DefaultDelay)}
+                                 ,{<<"timeout">>, wh_json:get_value([Key, <<"timeout">>], Endpoints, DefaultTimeout)}
                                 ], Member)
              || Key <- wh_json:get_keys(Endpoints)
             ];

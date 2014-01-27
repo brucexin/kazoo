@@ -14,6 +14,7 @@
          ,response_redirect/3, response_redirect/4
         ]).
 -export([response_202/2]).
+-export([response_402/2]).
 -export([response_faulty_request/1]).
 -export([response_bad_identifier/2]).
 -export([response_conflicting_docs/1]).
@@ -50,6 +51,11 @@ response(JTerm, Context) ->
                           cb_context:context().
 response_202(Msg, Context) ->
     create_response('success', Msg, 202, Msg, Context).
+
+-spec response_402(cb_context:context(), wh_json:json_string()) ->
+                          cb_context:context().
+response_402(Data, Context) ->
+    create_response('error', <<"accept charges">>, 402, Data, Context).
 
 %%--------------------------------------------------------------------
 %% @public
@@ -140,28 +146,34 @@ response_faulty_request(Context) ->
 %% ../module2
 %% @end
 %%--------------------------------------------------------------------
--spec response_deprecated(cb_context:context()) -> cb_context:context().
+-spec response_deprecated(cb_context:context()) ->
+                                 cb_context:context().
 response_deprecated(Context) ->
     create_response('error', <<"deprecated">>, 410, wh_json:new(), Context).
 
--spec response_deprecated_redirect(cb_context:context(), wh_json:json_string()) -> cb_context:context().
--spec response_deprecated_redirect(cb_context:context(), wh_json:json_string(), wh_json:object()) -> cb_context:context().
+-spec response_deprecated_redirect(cb_context:context(), ne_binary()) ->
+                                          cb_context:context().
+-spec response_deprecated_redirect(cb_context:context(), ne_binary(), wh_json:object()) ->
+                                          cb_context:context().
 response_deprecated_redirect(Context, RedirectUrl) ->
     response_deprecated_redirect(Context, RedirectUrl, wh_json:new()).
 response_deprecated_redirect(Context, RedirectUrl, JObj) ->
     create_response('error', <<"deprecated">>, 301, JObj
-                    ,cb_context:add_resp_header(<<"Location">>, RedirectUrl, Context)
+                    ,cb_context:add_resp_header(Context, <<"Location">>, RedirectUrl)
                    ).
 
--spec response_redirect(cb_context:context(), wh_json:json_string(), wh_json:object()) -> cb_context:context().
+-spec response_redirect(cb_context:context(), ne_binary(), wh_json:object()) ->
+                               cb_context:context().
 response_redirect(Context, RedirectUrl, JObj) ->
     response_redirect(Context, RedirectUrl, JObj, 301).
 
--spec response_redirect(cb_context:context(), wh_json:json_string(), wh_json:object(), integer()) -> cb_context:context().
+-spec response_redirect(cb_context:context(), ne_binary(), wh_json:object(), pos_integer()) ->
+                               cb_context:context().
 response_redirect(Context, RedirectUrl, JObj, Redirect) ->
     create_response('error', <<"redirect">>, Redirect, JObj
-                    ,cb_context:add_resp_header(<<"Location">>, RedirectUrl, Context)
+                    ,cb_context:add_resp_header(Context, <<"Location">>, RedirectUrl)
                    ).
+
 %%--------------------------------------------------------------------
 %% @public
 %% @doc

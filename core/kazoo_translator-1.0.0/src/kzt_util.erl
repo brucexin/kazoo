@@ -49,6 +49,8 @@
          ,set_media_meta/2, get_media_meta/1
          ,set_amqp_listener/2, get_amqp_listener/1
 
+         ,set_gather_pidref/2, get_gather_pidref/1
+
          ,set_conference_profile/2, get_conference_profile/1
          ,set_caller_controls/2, get_caller_controls/1
          ,set_advertise/2, get_advertise/1
@@ -229,6 +231,15 @@ get_media_meta(Call) -> whapps_call:kvs_fetch(<<"media_meta">>, Call).
 set_amqp_listener(Pid, Call) -> whapps_call:kvs_store(<<"amqp_listener">>, Pid, Call).
 get_amqp_listener(Call) -> whapps_call:kvs_fetch(<<"amqp_listener">>, Call).
 
+-spec set_gather_pidref({pid(), reference()} | 'undefined', whapps_call:call()) -> whapps_call:call().
+-spec get_gather_pidref(whapps_call:call()) -> {pid(), reference()} | 'undefined'.
+set_gather_pidref('undefined', Call) ->
+    whapps_call:kvs_store(<<"gather_pidref">>, 'undefined', Call);
+set_gather_pidref({_, _}=PidRef, Call) ->
+    gen_listener:cast(get_amqp_listener(Call), {'add_event_handler', PidRef}),
+    whapps_call:kvs_store(<<"gather_pidref">>, PidRef, Call).
+get_gather_pidref(Call) -> whapps_call:kvs_fetch(<<"gather_pidref">>, Call).
+
 set_conference_profile(JObj, Call) -> whapps_call:kvs_store(<<"conference_profile">>, JObj, Call).
 get_conference_profile(Call) -> whapps_call:kvs_fetch(<<"conference_profile">>, Call).
 
@@ -256,26 +267,17 @@ get_request_vars(Call) ->
 
 -spec xml_attributes_to_proplist(xml_attribs()) -> wh_proplist().
 xml_attributes_to_proplist(L) ->
-    [{K, V} || #xmlAttribute{name=K, value=V} <- L].
+    kz_xml:attributes_to_proplist(L).
 
 -spec xml_text_to_binary(xml_texts()) -> binary().
 xml_text_to_binary(Vs) when is_list(Vs) ->
-    lists:foldl(fun(C, B) ->
-                        wh_util:strip_binary(B, C)
-                end
-                ,iolist_to_binary([V || #xmlText{value=V, type='text'} <- Vs])
-                ,[$\n, $ , $\n, $ ]
-               ).
+    kz_xml:texts_to_binary(Vs).
 
 xml_text_to_binary(Vs, Size) when is_list(Vs), is_integer(Size), Size > 0 ->
-    B = xml_text_to_binary(Vs),
-    case byte_size(B) > Size of
-        'true' -> erlang:binary_part(B, 0, Size);
-        'false' -> B
-    end.
+    kz_xml:texts_to_binary(Vs, Size).
 
 -spec xml_elements(list()) -> xml_els().
-xml_elements(Els) -> [El || #xmlElement{}=El <- Els].
+xml_elements(Els) -> kz_xml:elements(Els).
 
 -ifdef(TEST).
 

@@ -18,11 +18,15 @@
          ,get_all_accounts_and_mods/1
          ,get_all_account_mods/0
          ,get_all_account_mods/1
+         ,get_account_mods/1
+         ,get_account_mods/2
         ]).
 -export([is_account_db/1
         ,is_account_mod/1
         ]).
--export([get_account_by_realm/1,get_accounts_by_name/1]).
+-export([get_account_by_realm/1
+         ,get_accounts_by_name/1
+        ]).
 -export([get_master_account_id/0]).
 -export([find_oldest_doc/1]).
 -export([get_event_type/1, put_callid/1]).
@@ -191,26 +195,48 @@ get_all_accounts(Encoding) ->
     {'ok', Databases} = couch_mgr:db_info(),
     [wh_util:format_account_id(Db, Encoding) || Db <- Databases, is_account_db(Db)].
 
+-spec get_all_accounts_and_mods() -> ne_binaries().
+-spec get_all_accounts_and_mods('unencoded' | 'encoded' | 'raw') -> ne_binaries().
 get_all_accounts_and_mods() -> get_all_accounts_and_mods(?REPLICATE_ENCODING).
 
 get_all_accounts_and_mods(Encoding) ->
     {'ok', Databases} = couch_mgr:db_info(),
     [wh_util:format_account_id(Db, Encoding) || Db <- Databases, is_account_db(Db) orelse is_account_mod(Db)].
 
+-spec get_all_account_mods() -> ne_binaries().
+-spec get_all_account_mods('unencoded' | 'encoded' | 'raw') -> ne_binaries().
 get_all_account_mods() -> get_all_account_mods(?REPLICATE_ENCODING).
 
 get_all_account_mods(Encoding) ->
     {'ok', Databases} = couch_mgr:db_info(),
     [wh_util:format_account_id(Db, Encoding) || Db <- Databases, is_account_mod(Db)].
-                                                 
+
+-spec get_account_mods(ne_binary()) -> ne_binaries().
+-spec get_account_mods(ne_binary(), 'unencoded' | 'encoded' | 'raw') -> ne_binaries().
+get_account_mods(AccountId) ->
+    get_account_mods(AccountId, ?REPLICATE_ENCODING).
+
+get_account_mods(AccountId, Encoding) ->
+    MODs = get_all_account_mods(Encoding),
+    [wh_util:format_account_id(MOD, Encoding)
+     || MOD <- MODs,
+        is_account_mod(MOD),
+        is_matched_account_mod(MOD, AccountId)
+    ].
+
+-spec is_matched_account_mod(ne_binary(), ne_binary()) -> ne_binary().
+is_matched_account_mod(<<"account/", DbActId:34/binary, _/binary>>, <<"account/", SearchId/binary>>) when DbActId =:= SearchId -> true;
+is_matched_account_mod(<<"account%2F", DbActId:38/binary, _/binary>>, <<"account%2F",SearchId/binary>>) when DbActId =:= SearchId -> true;
+is_matched_account_mod(_, _) -> false.
+
 -spec is_account_mod(ne_binary()) -> boolean().
 is_account_mod(<<"account/", _AccountId:34/binary, "-", _Date:6/binary>>) -> 'true';
 is_account_mod(<<"account%2F", _AccountId:38/binary, "-", _Date:6/binary>>) -> 'true';
-is_account_mod(_) -> 'false'. 
+is_account_mod(_) -> 'false'.
 
 -spec is_account_db(ne_binary()) -> boolean().
 is_account_db(<<"account/", _AccountId:34/binary, "-", _Date:6/binary>>) -> 'false';
-is_account_db(<<"account%2F", _AccountId:38/binary, "-", _Date:6/binary>>) -> 'false'; 
+is_account_db(<<"account%2F", _AccountId:38/binary, "-", _Date:6/binary>>) -> 'false';
 is_account_db(<<"account/", _/binary>>) -> 'true';
 is_account_db(<<"account%2f", _/binary>>) -> 'true';
 is_account_db(<<"account%2F", _/binary>>) -> 'true';
@@ -592,6 +618,5 @@ write_tts_file(Path, Say) ->
     file:write_file(Path, Wav).
 
 -spec decr_timeout(wh_timeout(), non_neg_integer() | wh_now()) -> wh_timeout().
-decr_timeout('infinity', _) -> 'infinity';
-decr_timeout(Timeout, Elapsed) when is_integer(Elapsed) -> Timeout - Elapsed;
-decr_timeout(Timeout, Start) -> decr_timeout(Timeout, wh_util:elapsed_ms(Start)).
+decr_timeout(Timeout, Elapsed) ->
+    wh_util:decr_timeout(Timeout, Elapsed).

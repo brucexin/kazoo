@@ -147,8 +147,6 @@
 -type audio_macro_prompts() :: [audio_macro_prompt(),...] | [].
 -export_type([audio_macro_prompt/0]).
 
--define(HOUR_IN_MS, 360000).
-
 %%--------------------------------------------------------------------
 %% @public
 %% @doc
@@ -283,7 +281,7 @@ relay_event(Pid, JObj) -> Pid ! {'amqp_msg', JObj}.
 receive_event(Timeout) -> receive_event(Timeout, 'true').
 receive_event(T, _) when T =< 0 -> {'error', 'timeout'};
 receive_event(Timeout, IgnoreOthers) ->
-    Start = erlang:now(),
+    Start = os:timestamp(),
     receive
         {'amqp_msg', JObj} -> {'ok', JObj};
         _ when IgnoreOthers ->
@@ -1522,7 +1520,7 @@ collect_digits(MaxDigits, Timeout, Interdigit, NoopId, Terminators, Call) ->
     collect_digits(MaxDigits, Timeout, Interdigit, NoopId, Terminators, Call, <<>>, ?MILLISECONDS_IN_DAY).
 
 collect_digits(MaxDigits, Timeout, Interdigit, NoopId, Terminators, Call, Digits, After) ->
-    Start = erlang:now(),
+    Start = os:timestamp(),
     receive
         {'amqp_msg', JObj} ->
             case get_event_type(JObj) of
@@ -1615,8 +1613,7 @@ wait_for_message(Call, Application, Event, Type) ->
     wait_for_message(Call, Application, Event, Type, 5000).
 
 wait_for_message(Call, Application, Event, Type, Timeout) ->
-    Start = erlang:now(),
-    RecvTimeout = recv_timeout(Timeout),
+    Start = os:timestamp(),
     receive
         {'amqp_msg', JObj} ->
             case get_event_type(JObj) of
@@ -1637,12 +1634,7 @@ wait_for_message(Call, Application, Event, Type, Timeout) ->
         _ ->
             wait_for_message(Call, Application, Event, Type, whapps_util:decr_timeout(Timeout, Start))
     after
-        RecvTimeout ->
-            case is_call_up(Call) of
-                'true' ->
-                    wait_for_message(Call, Application, Event, Type, whapps_util:decr_timeout(Timeout, Start));
-                'false' -> {'error', 'timeout'}
-            end
+        Timeout -> {'error', 'timeout'}
     end.
 
 %%--------------------------------------------------------------------
@@ -1671,8 +1663,7 @@ wait_for_application(Call, Application, Event, Type) ->
     wait_for_application(Call, Application, Event, Type, 500000).
 
 wait_for_application(Call, Application, Event, Type, Timeout) ->
-    Start = erlang:now(),
-    RecvTimeout = recv_timeout(Timeout),
+    Start = os:timestamp(),
     receive
         {'amqp_msg', JObj} ->
             case get_event_type(JObj) of
@@ -1690,11 +1681,7 @@ wait_for_application(Call, Application, Event, Type, Timeout) ->
         _ ->
             wait_for_application(Call, Application, Event, Type, whapps_util:decr_timeout(Timeout, Start))
     after
-        RecvTimeout ->
-            case is_call_up(Call) of
-                'true' -> wait_for_application(Call, Application, Event, Type, whapps_util:decr_timeout(Timeout, Start));
-                'false' -> {'error', 'timeout'}
-            end
+        Timeout -> {'error', 'timeout'}
     end.
 
 %%--------------------------------------------------------------------
@@ -1723,7 +1710,7 @@ wait_for_headless_application(Application, Event, Type) ->
     wait_for_headless_application(Application, Event, Type, 500000).
 
 wait_for_headless_application(Application, Event, Type, Timeout) ->
-    Start = erlang:now(),
+    Start = os:timestamp(),
     receive
         {'amqp_msg', JObj} ->
             case get_event_type(JObj) of
@@ -1758,7 +1745,7 @@ wait_for_headless_application(Application, Event, Type, Timeout) ->
                            {'error', 'channel_hungup' | wh_json:object()} |
                            {'ok', binary()}.
 wait_for_dtmf(Timeout) ->
-    Start = erlang:now(),
+    Start = os:timestamp(),
     receive
         {'amqp_msg', JObj} ->
             case whapps_util:get_event_type(JObj) of
@@ -1801,10 +1788,7 @@ wait_for_bridge(Timeout, Call) ->
 wait_for_bridge(Timeout, _, _) when Timeout < 0 ->
     {'error', 'timeout'};
 wait_for_bridge(Timeout, Fun, Call) ->
-    Start = erlang:now(),
-
-    RecvTimeout = recv_timeout(Timeout),
-
+    Start = os:timestamp(),
     receive
         {'amqp_msg', JObj} ->
             Disposition = wh_json:get_value(<<"Disposition">>, JObj),
@@ -1830,12 +1814,12 @@ wait_for_bridge(Timeout, Fun, Call) ->
                     end,
                     wait_for_bridge('infinity', Fun, Call);
                 {<<"call_event">>, <<"CHANNEL_DESTROY">>, _} ->
-                    %% TODO: reduce log level if no issue is found with 
+                    %% TODO: reduce log level if no issue is found with
                     %%    basing the Result on Disposition
                     lager:info("bridge completed with result ~s(~s)", [Disposition, Result]),
                     {Result, JObj};
                 {<<"call_event">>, <<"CHANNEL_EXECUTE_COMPLETE">>, <<"bridge">>} ->
-                    %% TODO: reduce log level if no issue is found with 
+                    %% TODO: reduce log level if no issue is found with
                     %%    basing the Result on Disposition
                     lager:info("bridge completed with result ~s(~s)", [Disposition, Result]),
                     {Result, JObj};
@@ -1846,35 +1830,8 @@ wait_for_bridge(Timeout, Fun, Call) ->
         %%   this process hangs around...
         _ -> wait_for_bridge(whapps_util:decr_timeout(Timeout, Start), Fun, Call)
     after
-        RecvTimeout ->
-            case is_call_up(Call) of
-                'true' -> wait_for_bridge(whapps_util:decr_timeout(Timeout, Start), Fun, Call);
-                'false' -> {'error', 'timeout'}
-            end
+        Timeout -> {'error', 'timeout'}
     end.
-
--spec is_call_up(whapps_call:call() | ne_binary()) -> boolean().
-is_call_up(CallId) when is_binary(CallId) ->
-    case whapps_util:amqp_pool_request([{<<"Call-ID">>, CallId}
-                                        | wh_api:default_headers(?APP_NAME, ?APP_VERSION)
-                                       ]
-                                       ,fun wapi_call:publish_channel_status_req/1
-                                       ,fun wapi_call:channel_status_resp_v/1
-                                      )
-    of
-        {'error', _} -> 'false';
-        {'ok', Resp} ->
-                    case wapi_call:get_status(Resp) of
-                        <<"success">> -> 'true';
-                        _ -> 'false'
-                    end
-    end;
-is_call_up(Call) ->
-    is_call_up(whapps_call:call_id_direct(Call)).
-
--spec recv_timeout(wh_timeout()) -> integer().
-recv_timeout('infinity') -> ?HOUR_IN_MS;
-recv_timeout(T) -> T.
 
 %%--------------------------------------------------------------------
 %% @public
@@ -1974,7 +1931,7 @@ wait_for_unbridge() ->
                                           whapps_api_std_return() |
                                           {'dtmf', binary()}.
 wait_for_application_or_dtmf(Application, Timeout) ->
-    Start = erlang:now(),
+    Start = os:timestamp(),
     receive
         {'amqp_msg', JObj} ->
             case get_event_type(JObj) of
@@ -2001,7 +1958,7 @@ wait_for_application_or_dtmf(Application, Timeout) ->
     end.
 
 -type wait_for_fax_ret() :: {'ok', wh_json:object()} |
-                            {'error', 'channel_destroy' | 'channel_hungup' | wh_json:object()}.
+                            {'error', 'timeout' | wh_json:object()}.
 
 -define(WAIT_FOR_FAX_TIMEOUT, whapps_config:get_integer(<<"fax">>, <<"wait_for_fax_timeout_ms">>, 3600000)).
 
@@ -2009,7 +1966,7 @@ wait_for_application_or_dtmf(Application, Timeout) ->
 -spec wait_for_fax(wh_timeout()) -> wait_for_fax_ret().
 wait_for_fax() -> wait_for_fax(?WAIT_FOR_FAX_TIMEOUT).
 wait_for_fax(Timeout) ->
-    Start = erlang:now(),
+    Start = os:timestamp(),
     receive
         {'amqp_msg', JObj} ->
             case get_event_type(JObj) of
@@ -2020,8 +1977,9 @@ wait_for_fax(Timeout) ->
                 {<<"call_event">>, <<"CHANNEL_EXECUTE_COMPLETE">>, <<"receive_fax">>} ->
                     {'ok', wh_json:set_value(<<"Fax-Success">>, 'true', JObj)};
                 {<<"call_event">>, <<"CHANNEL_DESTROY">>, _} ->
-                    lager:debug("channel hungup but no end of fax"),
-                    {'error', 'channel_hungup'};
+                    %% NOTE:
+                    lager:debug("channel hungup but no end of fax, maybe its coming next..."),
+                    wait_for_fax(5000);
                 _ -> wait_for_fax(whapps_util:decr_timeout(Timeout, Start))
             end;
         _ -> wait_for_fax(whapps_util:decr_timeout(Timeout, Start))

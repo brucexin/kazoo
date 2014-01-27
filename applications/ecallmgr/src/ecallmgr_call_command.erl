@@ -820,7 +820,7 @@ bridge_handle_hold_media(DP, _Node, UUID, JObj) ->
 
 bridge_handle_secure_rtp(DP, _Node, _UUID, JObj) ->
     case wh_json:is_true(<<"Secure-RTP">>, JObj, 'false') of
-        'true' -> [{"application", "set sip_secure_media=true"}|DP];
+        'true' -> [{"application", "set zrtp_secure_media=true"}|DP];
         'false' -> DP
     end.
 
@@ -952,9 +952,9 @@ stream_over_http(Node, UUID, File, Method, Type, JObj) ->
 
 -spec send_fs_store(atom(), ne_binary(), 'put' | 'post') -> fs_api_ret().
 send_fs_store(Node, Args, 'put') ->
-    freeswitch:api(Node, 'http_put', wh_util:to_list(Args));
+    freeswitch:api(Node, 'http_put', wh_util:to_list(Args), 20000);
 send_fs_store(Node, Args, 'post') ->
-    freeswitch:api(Node, 'http_post', wh_util:to_list(Args)).
+    freeswitch:api(Node, 'http_post', wh_util:to_list(Args), 20000).
 
 -spec send_store_call_event(atom(), ne_binary(), wh_json:object() | ne_binary()) -> 'ok'.
 send_store_call_event(Node, UUID, MediaTransResults) ->

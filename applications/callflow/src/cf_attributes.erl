@@ -117,7 +117,7 @@ maybe_prefix_cid_number(Number, Name, Validate, Attribute, Call) ->
             Prefixed = <<(wh_util:to_binary(Prefix))/binary, Number/binary>>,
             maybe_prefix_cid_name(Prefixed, Name, Validate, Attribute, Call)
     end.
-
+ 
 -spec maybe_prefix_cid_name(ne_binary(), ne_binary(), boolean(), ne_binary(), whapps_call:call()) ->
                                    {api_binary(), api_binary()}.
 maybe_prefix_cid_name(Number, Name, Validate, Attribute, Call) ->
@@ -135,7 +135,7 @@ maybe_ensure_cid_valid(Number, Name, 'true', <<"external">>, Call) ->
         'true' -> ensure_valid_caller_id(Number, Name, Call);
         'false' ->
             lager:info("external caller id <~s> ~s", [Name, Number]),
-            {Number, Name}
+            maybe_cid_privacy(Number, Name, Call)
     end;
 maybe_ensure_cid_valid(Number, Name, 'true', <<"emergency">>, Call) ->
     case whapps_config:get_is_true(<<"callflow">>, <<"ensure_valid_emergency_number">>, 'false') of
@@ -144,9 +144,18 @@ maybe_ensure_cid_valid(Number, Name, 'true', <<"emergency">>, Call) ->
             lager:info("emergency caller id <~s> ~s", [Name, Number]),
             {Number, Name}
     end;
-maybe_ensure_cid_valid(Number, Name, _, Attribute, _) ->
+maybe_ensure_cid_valid(Number, Name, _, Attribute, Call) ->
     lager:info("~s caller id <~s> ~s", [Attribute, Name, Number]),
-    {Number, Name}.
+    maybe_cid_privacy(Number, Name, Call).
+
+maybe_cid_privacy(Number, Name, Call) ->
+    case wh_util:is_true(whapps_call:kvs_fetch('cf_privacy', Call)) of
+        'true' ->
+            lager:info("overriding caller id to maintain privacy"),
+            {whapps_config:get_non_empty(<<"callflow">>, <<"privacy_number">>, <<"0000000000">>)
+            ,whapps_config:get_non_empty(<<"callflow">>, <<"privacy_name">>, <<"anonymous">>)};
+        'false' -> {Number, Name}
+    end.
 
 -spec ensure_valid_emergency_number(ne_binary(), api_binary(), whapps_call:call()) ->
                                            {api_binary(), api_binary()}.
@@ -414,7 +423,7 @@ presence_id(Endpoint, Call) ->
 %% @end
 %%-----------------------------------------------------------------------------
 -spec owned_by(api_binary(), whapps_call:call()) -> api_binaries().
--spec owned_by(api_binary(), ne_binary(), whapps_call:call()) -> api_binaries().
+-spec owned_by(api_binary() | api_binaries(), ne_binary(), whapps_call:call()) -> api_binaries().
 
 owned_by('undefined', _) -> [];
 owned_by(OwnerId, Call) ->
@@ -430,13 +439,19 @@ owned_by(OwnerId, Call) ->
     end.
 
 owned_by('undefined', _, _) -> [];
+owned_by([_|_]=OwnerIds, Type, Call) ->
+    Keys = [[OwnerId, Type] || OwnerId <- OwnerIds],
+    owned_by_query([{'keys', Keys}], Call);
 owned_by(OwnerId, Type, Call) ->
+    owned_by_query([{'key', [OwnerId, Type]}], Call).
+
+-spec owned_by_query(list(), whapps_call:call()) -> api_binaries().
+owned_by_query(ViewOptions, Call) ->
     AccountDb = whapps_call:account_db(Call),
-    ViewOptions = [{'key', [OwnerId, Type]}],
     case couch_mgr:get_results(AccountDb, <<"cf_attributes/owned">>, ViewOptions) of
         {'ok', JObjs} -> [wh_json:get_value(<<"value">>, JObj) || JObj <- JObjs];
         {'error', _R} ->
-            lager:warning("unable to find ~s documents owned by ~s: ~p", [Type, OwnerId, _R]),
+            lager:warning("unable to find owned documents (~p) using ~p", [_R, ViewOptions]),
             []
     end.
 
@@ -457,6 +472,13 @@ default_cid_name(Endpoint) ->
     end.
 
 -spec get_cid_or_default(ne_binary(), ne_binary(), wh_json:object()) -> api_binary().
+get_cid_or_default(<<"emergency">>, Property, Endpoint) ->
+    case wh_json:get_first_defined([[<<"caller_id">>, <<"emergency">>, Property]
+                                    ,[<<"caller_id">>, <<"external">>, Property]
+                                   ], Endpoint) of
+        'undefined' -> wh_json:get_ne_value([<<"default">>, Property], Endpoint);
+        Value -> Value
+    end;
 get_cid_or_default(Attribute, Property, Endpoint) ->
     case wh_json:get_ne_value([<<"caller_id">>, Attribute, Property], Endpoint) of
         'undefined' -> wh_json:get_ne_value([<<"default">>, Property], Endpoint);

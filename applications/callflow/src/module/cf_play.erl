@@ -26,6 +26,7 @@ handle(Data, Call) ->
         <<"/system_media", _/binary>> = Path -> play(Data, Call, Path);
         <<"system_media", _/binary>> = Path -> play(Data, Call, Path);
         <<"local_stream://",_/binary>> = Path -> play(Data, Call, Path);
+        <<"silence_stream://",_/binary>> = Path -> play(Data, Call, Path);
         Path when AccountId =/= 'undefined' ->
             lager:info("prepending media ID with /~s/", [AccountId]),
             Path1 = <<$/, (wh_util:to_binary(AccountId))/binary, $/, Path/binary>>,
@@ -39,7 +40,8 @@ handle(Data, Call) ->
 play(Data, Call, Media) ->
     case wh_json:is_false(<<"answer">>, Data) of
         'true' -> 'ok';
-        'false' -> whapps_call_command:answer(Call)
+        'false' -> whapps_call_command:answer(Call),
+                   timer:sleep(100)
     end,
     lager:info("playing media ~s", [Media]),
     _ = whapps_call_command:b_play(Media, Call).

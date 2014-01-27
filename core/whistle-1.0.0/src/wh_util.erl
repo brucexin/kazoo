@@ -9,13 +9,14 @@
 %%%-------------------------------------------------------------------
 -module(wh_util).
 
--export([log_stacktrace/0, log_stacktrace/1]).
--export([format_account_id/1
-         ,format_account_id/2
-         ,format_account_id/3
+-export([log_stacktrace/0, log_stacktrace/1
+         ,format_account_id/1, format_account_id/2, format_account_id/3
+         ,format_account_mod_id/2, format_account_mod_id/3
         ]).
 -export([is_in_account_hierarchy/2, is_in_account_hierarchy/3]).
--export([is_system_admin/1]).
+-export([is_system_admin/1
+         ,is_system_db/1
+        ]).
 -export([get_account_realm/1, get_account_realm/2]).
 -export([is_account_enabled/1]).
 
@@ -31,7 +32,8 @@
         ]).
 -export([to_boolean/1, is_boolean/1
          ,is_true/1, is_false/1
-         ,is_empty/1, is_proplist/1
+         ,is_empty/1, is_not_empty/1
+         ,is_proplist/1
         ]).
 -export([to_lower_binary/1, to_upper_binary/1
          ,to_lower_string/1, to_upper_string/1
@@ -53,6 +55,7 @@
 -export([current_tstamp/0, ensure_started/1]).
 -export([gregorian_seconds_to_unix_seconds/1, unix_seconds_to_gregorian_seconds/1
          ,pretty_print_datetime/1
+         ,decr_timeout/2
         ]).
 -export([microseconds_to_seconds/1
          ,milliseconds_to_seconds/1
@@ -142,14 +145,14 @@ change_syslog_log_level(L) ->
 %%--------------------------------------------------------------------
 %% @public
 %% @doc
-%% Given a representation of an account return it in a encoded,
-%% unencoded or raw format.
+%% Given a representation of an account return it in a 'encoded',
+%% unencoded or 'raw' format.
 %% @end
 %%--------------------------------------------------------------------
 -type account_format() :: 'unencoded' | 'encoded' | 'raw'.
--spec format_account_id(ne_binaries() | ne_binary() | wh_json:object()) -> ne_binary().
--spec format_account_id(ne_binaries() | ne_binary() | wh_json:object(), account_format()) -> ne_binary().
--spec format_account_id(ne_binaries(), pos_integer(), pos_integer()) -> ne_binary().
+-spec format_account_id(ne_binaries() | api_binary() | wh_json:object()) -> ne_binary().
+-spec format_account_id(ne_binaries() | api_binary() | wh_json:object(), account_format()) -> ne_binary().
+-spec format_account_id(ne_binaries() | api_binary(), wh_year(), wh_month()) -> ne_binary().
 
 format_account_id(Doc) -> format_account_id(Doc, 'unencoded').
 
@@ -195,7 +198,16 @@ format_account_id(AccountId, Year, Month) when is_integer(Year), is_integer(Mont
     <<(format_account_id(AccountId, 'encoded'))/binary
       ,"-"
       ,(to_binary(Year))/binary
-      ,(pad_month(Month))/binary>>.
+      ,(pad_month(Month))/binary
+    >>.
+
+-spec format_account_mod_id(ne_binary(), pos_integer()) -> ne_binary().
+-spec format_account_mod_id(ne_binary(), wh_year(), wh_month()) -> ne_binary().
+format_account_mod_id(AccountId, Timestamp) ->
+    {{Year, Month, _}, _} = calendar:gregorian_seconds_to_datetime(Timestamp),
+    format_account_id(AccountId, Year, Month).
+format_account_mod_id(AccountId, Year, Month) ->
+    format_account_id(AccountId, Year, Month).
 
 -spec pad_month(pos_integer()) -> ne_binary().
 pad_month(Month) when Month < 10 ->
@@ -220,14 +232,14 @@ is_in_account_hierarchy(CheckFor, InAccount) ->
 is_in_account_hierarchy('undefined', _, _) -> 'false';
 is_in_account_hierarchy(_, 'undefined', _) -> 'false';
 is_in_account_hierarchy(CheckFor, InAccount, IncludeSelf) ->
-    CheckId = wh_util:format_account_id(CheckFor, raw),
-    AccountId = wh_util:format_account_id(InAccount, raw),
-    AccountDb = wh_util:format_account_id(InAccount, encoded),
+    CheckId = wh_util:format_account_id(CheckFor, 'raw'),
+    AccountId = wh_util:format_account_id(InAccount, 'raw'),
+    AccountDb = wh_util:format_account_id(InAccount, 'encoded'),
     case (IncludeSelf andalso AccountId =:= CheckId) orelse couch_mgr:open_cache_doc(AccountDb, AccountId) of
         'true' ->
             lager:debug("account ~s is the same as the account to fetch the hierarchy from", [CheckId]),
             'true';
-        {ok, JObj} ->
+        {'ok', JObj} ->
             Tree = wh_json:get_value(<<"pvt_tree">>, JObj, []),
             case lists:member(CheckId, Tree) of
                 'true' ->
@@ -237,7 +249,7 @@ is_in_account_hierarchy(CheckFor, InAccount, IncludeSelf) ->
                     lager:debug("account ~s was not found in the account hierarchy of ~s", [CheckId, AccountId]),
                     'false'
             end;
-        {error, _R} ->
+        {'error', _R} ->
             lager:debug("failed to get the ancestory of the account ~s: ~p", [AccountId, _R]),
             'false'
     end.
@@ -251,14 +263,18 @@ is_in_account_hierarchy(CheckFor, InAccount, IncludeSelf) ->
 -spec is_system_admin(api_binary()) -> boolean().
 is_system_admin('undefined') -> 'false';
 is_system_admin(Account) ->
-    AccountId = wh_util:format_account_id(Account, raw),
-    AccountDb = wh_util:format_account_id(Account, encoded),
+    AccountId = wh_util:format_account_id(Account, 'raw'),
+    AccountDb = wh_util:format_account_id(Account, 'encoded'),
     case couch_mgr:open_cache_doc(AccountDb, AccountId) of
-        {ok, JObj} -> wh_json:is_true(<<"pvt_superduper_admin">>, JObj);
-        {error, _R} ->
+        {'ok', JObj} -> wh_json:is_true(<<"pvt_superduper_admin">>, JObj);
+        {'error', _R} ->
             lager:debug("unable to open account definition for ~s: ~p", [Account, _R]),
             'false'
     end.
+
+-spec is_system_db(ne_binary()) -> boolean().
+is_system_db(Db) ->
+    lists:member(Db, ?KZ_SYSTEM_DBS).
 
 %%--------------------------------------------------------------------
 %% @public
@@ -279,7 +295,7 @@ is_account_enabled(Account) ->
             lager:error("could not open account ~p in ~p", [AccountId, AccountDb]),
             'false';
         {'ok', JObj} ->
-            wh_json:is_true(<<"pvt_enabled">>, JObj, 'true') 
+            wh_json:is_true(<<"pvt_enabled">>, JObj, 'true')
                 andalso wh_json:is_true(<<"enabled">>, JObj, 'true')
 
     end.
@@ -293,15 +309,15 @@ is_account_enabled(Account) ->
 -spec get_account_realm(api_binary(), ne_binary()) -> api_binary().
 get_account_realm(AccountId) ->
     get_account_realm(
-      wh_util:format_account_id(AccountId, encoded)
-      ,wh_util:format_account_id(AccountId, raw)
+      wh_util:format_account_id(AccountId, 'encoded')
+      ,wh_util:format_account_id(AccountId, 'raw')
      ).
 
 get_account_realm('undefined', _) -> 'undefined';
 get_account_realm(Db, AccountId) ->
     case couch_mgr:open_cache_doc(Db, AccountId) of
-        {ok, JObj} -> wh_json:get_ne_value(<<"realm">>, JObj);
-        {error, R} ->
+        {'ok', JObj} -> wh_json:get_ne_value(<<"realm">>, JObj);
+        {'error', R} ->
             lager:debug("error while looking up account realm in ~s: ~p", [AccountId, R]),
             'undefined'
     end.
@@ -397,21 +413,17 @@ randomize_list(T, List) ->
 %% dictionary, failing that the Msg-ID and finally a generic
 %% @end
 %%--------------------------------------------------------------------
--spec put_callid(wh_json:object() | wh_proplist() | ne_binary()) -> api_binary().
+-spec put_callid(wh_json:object() | wh_proplist() | ne_binary() | atom()) ->
+                        api_binary().
 put_callid(?NE_BINARY = CallId) -> erlang:put('callid', CallId);
+put_callid(Atom) when is_atom(Atom) -> erlang:put('callid', Atom);
 put_callid(Prop) when is_list(Prop) -> erlang:put('callid', callid(Prop));
 put_callid(JObj) -> erlang:put('callid', callid(JObj)).
 
 callid(Prop) when is_list(Prop) ->
-    case props:get_value(<<"Call-ID">>, Prop) of
-        'undefined' -> props:get_value(<<"Msg-ID">>, Prop, ?LOG_SYSTEM_ID);
-        C -> C
-    end;
+    props:get_first_defined([<<"Call-ID">>, <<"Msg-ID">>], Prop, ?LOG_SYSTEM_ID);
 callid(JObj) ->
-    case wh_json:get_binary_value(<<"Call-ID">>, JObj) of
-        'undefined' -> wh_json:get_binary_value(<<"Msg-ID">>, JObj, ?LOG_SYSTEM_ID);
-        C -> C
-    end.
+    wh_json:get_first_defined([<<"Call-ID">>, <<"Msg-ID">>], JObj, ?LOG_SYSTEM_ID).
 
 %%--------------------------------------------------------------------
 %% @public
@@ -494,7 +506,7 @@ uri_encode(Atom) when is_atom(Atom) ->
 
 -spec to_integer(string() | binary() | integer() | float()) -> integer().
 -spec to_integer(string() | binary() | integer() | float(), 'strict' | 'notstrict') -> integer().
-to_integer(X) -> to_integer(X, notstrict).
+to_integer(X) -> to_integer(X, 'notstrict').
 
 to_integer(X, 'strict') when is_float(X) -> erlang:error('badarg');
 to_integer(X, 'notstrict') when is_float(X) -> round(X);
@@ -622,6 +634,9 @@ is_empty(MaybeJObj) ->
         'true' -> wh_json:is_empty(MaybeJObj)
     end.
 
+-spec is_not_empty(term()) -> boolean().
+is_not_empty(Term) -> (not is_empty(Term)).
+
 -spec is_proplist(any()) -> boolean().
 is_proplist(Term) when is_list(Term) ->
     lists:all(fun({_,_}) -> 'true'; (A) -> is_atom(A) end, Term);
@@ -737,7 +752,7 @@ whistle_version(FileName) ->
     case file:read_file(FileName) of
         {'ok', Version} ->
             wh_cache:store(?WHISTLE_VERSION_CACHE_KEY, Version),
-            list_to_binary(string:strip(binary_to_list(Version), right, $\n));
+            list_to_binary(string:strip(binary_to_list(Version), 'right', $\n));
         _ ->
             Version = <<"not available">>,
             wh_cache:store(?WHISTLE_VERSION_CACHE_KEY, Version),
@@ -774,6 +789,16 @@ pretty_print_datetime(Timestamp) when is_integer(Timestamp) ->
 pretty_print_datetime({{Y,Mo,D},{H,Mi,S}}) ->
     iolist_to_binary(io_lib:format("~4..0w-~2..0w-~2..0w_~2..0w-~2..0w-~2..0w",
                                    [Y, Mo, D, H, Mi, S])).
+
+-spec decr_timeout(wh_timeout(), non_neg_integer() | wh_now()) -> wh_timeout().
+decr_timeout('infinity', _) -> 'infinity';
+decr_timeout(Timeout, Elapsed) when is_integer(Elapsed) ->
+    Diff = Timeout - Elapsed,
+    case Diff < 0 of
+        'true' -> 0;
+        'false' -> Diff
+    end;
+decr_timeout(Timeout, Start) -> decr_timeout(Timeout, wh_util:elapsed_ms(Start)).
 
 -spec microseconds_to_seconds(float() | integer() | string() | binary()) -> non_neg_integer().
 microseconds_to_seconds(Microseconds) -> to_integer(Microseconds) div 1000000.

@@ -42,6 +42,7 @@
 %% Internally-used functions
 -export([map_processor/5
          ,fold_processor/5
+         ,get_bindings/1
         ]).
 
 %% gen_server callbacks
@@ -96,7 +97,11 @@ get_bindings(Routing) ->
     [Vsn, Action | _] = binary:split(Routing, <<".">>, ['global']),
 
     ets:select(?MODULE, [{ {'_', '_', '_', '$1'}
-                           ,[{'=:=', '$1', <<Vsn/binary, ".", Action/binary>>}]
+                           ,[{'orelse',
+                                {'=:=', '$1', <<Vsn/binary, ".", Action/binary>>}
+                                ,{'=:=', '$1', <<"*.", Action/binary>>}
+                             }
+                            ]
                            ,['$_']
                          }]).
 %% ets:match(?MODULE, ['$_']).
@@ -142,8 +147,14 @@ start_link() ->
 
 stop() -> gen_server:cast(?SERVER, 'stop').
 
--spec bind(ne_binary(), atom(), atom()) -> 'ok' | {'error', 'exists'}.
-bind(Binding, Module, Fun) ->
+-type bind_result() :: 'ok' |
+                       {'error', 'exists'}.
+-type bind_results() :: [bind_result(),...] | [].
+-spec bind(ne_binary() | ne_binaries(), atom(), atom()) ->
+                  bind_result() | bind_results().
+bind([_|_]=Bindings, Module, Fun) ->
+    [bind(Binding, Module, Fun) || Binding <- Bindings];
+bind(Binding, Module, Fun) when is_binary(Binding) ->
     gen_server:call(?MODULE, {'bind', Binding, Module, Fun}, 'infinity').
 
 -spec flush() -> 'ok'.
@@ -195,8 +206,23 @@ maybe_init_mod(ModBin) ->
         _ -> 'ok'
     catch
         _E:_R ->
-            lager:warning("failed to initialize ~s: ~p, ~p", [ModBin, _E, _R])
+            lager:warning("failed to initialize ~s: ~p, ~p. Trying other versions...", [ModBin, _E, _R]),
+            maybe_init_mod_versions(?VERSION_SUPPORTED, ModBin)
     end.
+
+maybe_init_mod_versions([], _) -> 'ok';
+maybe_init_mod_versions([Version|Versions], ModBin) ->
+    Module = <<ModBin/binary, "_", Version/binary>>,
+    try (wh_util:to_atom(Module, 'true')):init() of
+        _ -> maybe_init_mod_versions(Versions, ModBin)
+    catch
+        _E:_R ->
+            lager:warning("failed to initialize ~s: ~p, ~p", [Module, _E, _R]),
+            maybe_init_mod_versions(Versions, ModBin)
+    end.
+
+
+
 
 %%--------------------------------------------------------------------
 %% @private
@@ -288,7 +314,7 @@ flush_mod(CBMod, {Binding, _BParts, MFs, _Prefix}) ->
             lager:debug("removing mod ~s from ~s", [CBMod, Binding]),
             ets:update_element(?MODULE, Binding, {3, Filtered})
     end.
-            
+
 
 %%--------------------------------------------------------------------
 %% @private
@@ -405,12 +431,42 @@ fold_bind_results(MFs, Payload, Route) ->
 
 -spec fold_bind_results([{atom(), atom()},...] | [], term(), ne_binary(), non_neg_integer(), [{atom(), atom()},...] | []) -> term().
 fold_bind_results([{M,F}|MFs], [_|Tokens]=Payload, Route, MFsLen, ReRunQ) ->
-    case catch apply(M, F, Payload) of
-        'eoq' -> lager:debug("putting ~s to eoq", [M]), fold_bind_results(MFs, Payload, Route, MFsLen, [{M,F}|ReRunQ]);
-        {'error', _E}=E -> lager:debug("error, E"), E;
-        {'EXIT', _E} -> lager:debug("excepted: ignoring"), fold_bind_results(MFs, Payload, Route, MFsLen, ReRunQ);
+    try apply(M, F, Payload) of
+        'eoq' ->
+            lager:debug("putting ~s to eoq", [M]),
+            fold_bind_results(MFs, Payload, Route, MFsLen, [{M,F}|ReRunQ]);
+        {'error', _E}=E ->
+            lager:debug("error: ~p", [_E]),
+            E;
+        {'EXIT', {'undef', [{_M, _F, _A, _}|_]}} ->
+            lager:debug("~s:~s/~p not defined, in call ~s:~s/~p"
+                        ,[_M, _F, length(_A)
+                          ,M, F, length(Payload)
+                         ]
+                       ),
+            fold_bind_results(MFs, Payload, Route, MFsLen, ReRunQ);
+        {'EXIT', _E} ->
+            ST = erlang:get_stacktrace(),
+            lager:debug("~s:~s/~p died unexpectedly: ~p", [M, F, length(Payload), _E]),
+            wh_util:log_stacktrace(ST),
+            fold_bind_results(MFs, Payload, Route, MFsLen, ReRunQ);
         Pay1 ->
             fold_bind_results(MFs, [Pay1|Tokens], Route, MFsLen, ReRunQ)
+    catch
+        'error':'function_clause' ->
+            ST = erlang:get_stacktrace(),
+            lager:debug("failed to find matching function clause for ~s:~s/~b", [M, F, length(Payload)]),
+            wh_util:log_stacktrace(ST),
+            fold_bind_results(MFs, Payload, Route, MFsLen, ReRunQ);
+        'error':'undef' ->
+            ST = erlang:get_stacktrace(),
+            log_undefined(M, F, length(Payload), ST),
+            fold_bind_results(MFs, Payload, Route, MFsLen, ReRunQ);
+        _T:_E ->
+            ST = erlang:get_stacktrace(),
+            lager:debug("excepted: ~s: ~p", [_T, _E]),
+            wh_util:log_stacktrace(ST),
+            fold_bind_results(MFs, Payload, Route, MFsLen, ReRunQ)
     end;
 fold_bind_results([], Payload, Route, MFsLen, ReRunQ) ->
     case length(ReRunQ) of
@@ -423,6 +479,19 @@ fold_bind_results([], Payload, Route, MFsLen, ReRunQ) ->
             lager:debug("loop detected for ~s, returning", [Route]),
             Payload
     end.
+
+-spec log_undefined(atom(), atom(), integer(), list()) -> 'ok'.
+log_undefined(M, F, Length, [{M, F, _Args,_}|_]) ->
+    lager:debug("undefined function ~s:~s/~b", [M, F, Length]);
+log_undefined(M, F, Length, [{RealM, RealF, RealArgs,_}|_]) ->
+    lager:debug("undefined function ~s:~s/~b", [RealM, RealF, length(RealArgs)]),
+    lager:debug("in call ~s:~s/~b", [M, F, Length]);
+log_undefined(M, F, Length, [{RealM, RealF, RealArgs}|_]) ->
+    lager:debug("undefined function ~s:~s/~b", [RealM, RealF, length(RealArgs)]),
+    lager:debug("in call ~s:~s/~b", [M, F, Length]);
+log_undefined(M, F, Length, ST) ->
+    lager:debug("undefined function ~s:~s/~b", [M, F, Length]),
+    wh_util:log_stacktrace(ST).
 
 %%-------------------------------------------------------------------------
 %% @doc
@@ -474,6 +543,7 @@ map_processor(Routing, Payload, Bs) when not is_list(Payload) ->
 map_processor(Routing, Payload, Bs) ->
     RoutingParts = lists:reverse(binary:split(Routing, <<".">>, ['global'])),
     Map = fun({Mod, Fun}) when is_atom(Mod) ->
+                  %% lager:debug("executing(map) ~s:~s/~p", [Mod, Fun, length(Payload)]),
                   apply(Mod, Fun, Payload)
           end,
     lists:foldl(fun({B, _, MFs, _Pre}, Acc) when B =:= Routing ->

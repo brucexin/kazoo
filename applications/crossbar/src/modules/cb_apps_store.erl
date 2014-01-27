@@ -36,13 +36,13 @@
 %%--------------------------------------------------------------------
 -spec init() -> 'ok'.
 init() ->
-    _ = crossbar_bindings:bind(<<"v1_resource.content_types_provided.apps_store">>, ?MODULE, 'content_types_provided'),
-    _ = crossbar_bindings:bind(<<"v1_resource.authenticate">>, ?MODULE, 'authenticate'),
-    _ = crossbar_bindings:bind(<<"v1_resource.authorize">>, ?MODULE, 'authorize'),
-    _ = crossbar_bindings:bind(<<"v1_resource.allowed_methods.apps_store">>, ?MODULE, 'allowed_methods'),
-    _ = crossbar_bindings:bind(<<"v1_resource.resource_exists.apps_store">>, ?MODULE, 'resource_exists'),
-    _ = crossbar_bindings:bind(<<"v1_resource.validate.apps_store">>, ?MODULE, 'validate'),
-    _ = crossbar_bindings:bind(<<"v1_resource.execute.get.apps_store">>, ?MODULE, 'get').
+    _ = crossbar_bindings:bind(<<"*.content_types_provided.apps_store">>, ?MODULE, 'content_types_provided'),
+    _ = crossbar_bindings:bind(<<"*.authenticate">>, ?MODULE, 'authenticate'),
+    _ = crossbar_bindings:bind(<<"*.authorize">>, ?MODULE, 'authorize'),
+    _ = crossbar_bindings:bind(<<"*.allowed_methods.apps_store">>, ?MODULE, 'allowed_methods'),
+    _ = crossbar_bindings:bind(<<"*.resource_exists.apps_store">>, ?MODULE, 'resource_exists'),
+    _ = crossbar_bindings:bind(<<"*.validate.apps_store">>, ?MODULE, 'validate'),
+    _ = crossbar_bindings:bind(<<"*.execute.get.apps_store">>, ?MODULE, 'get').
 
 %%--------------------------------------------------------------------
 %% @public
@@ -171,7 +171,7 @@ get_icon(Id, Context) ->
                 'undefined' -> crossbar_util:response_bad_identifier(Id, Context);
                 Attachment ->
                     lists:foldl(fun({K, V}, C) ->
-                                    cb_context:add_resp_header(K, V, C)
+                                    cb_context:add_resp_header(C, K, V)
                                 end
                                 ,crossbar_doc:load_attachment(Id, Icon, Con)
                                 ,[{<<"Content-Disposition">>, <<"attachment; filename=", Icon/binary>>}
@@ -192,7 +192,7 @@ get_sreenshot(Id, Context, Num) ->
                 {'ok', Screenshot, Attachment} ->
                     lists:foldl(
                         fun({K, V}, C) ->
-                            cb_context:add_resp_header(K, V, C)
+                            cb_context:add_resp_header(C, K, V)
                         end
                         ,crossbar_doc:load_attachment(Id, Screenshot, Con)
                         ,[{<<"Content-Disposition">>, <<"attachment; filename=", Screenshot/binary>>}
@@ -203,7 +203,9 @@ get_sreenshot(Id, Context, Num) ->
         Context1 -> Context1
     end.
 
--spec maybe_get_screenshot(ne_binary(), cb_context:context()) -> 'error' | cb_context:context().
+-spec maybe_get_screenshot(ne_binary(), cb_context:context()) ->
+                                  'error' |
+                                  {'ok', ne_binary(), ne_binary()}.
 maybe_get_screenshot(Num, #cb_context{doc=JObj}=Context) ->
     Screenshots = wh_json:get_value(<<"screenshots">>, JObj),
     try lists:nth(wh_util:to_integer(Num)+1, Screenshots) of
@@ -212,7 +214,9 @@ maybe_get_screenshot(Num, #cb_context{doc=JObj}=Context) ->
         _:_ -> 'error'
     end.
 
--spec maybe_get_attachment(cb_context:context(), ne_binary()) -> 'error' | {'ok', ne_binary(), ne_binary()}.
+-spec maybe_get_attachment(cb_context:context(), ne_binary()) ->
+                                  'error' |
+                                  {'ok', ne_binary(), wh_json:object()}.
 maybe_get_attachment(#cb_context{doc=JObj}, Name) ->
     case wh_json:get_value([<<"_attachments">>, Name], JObj) of
         'undefined' -> 'error';
@@ -258,7 +262,7 @@ read(Id, Context) ->
 %% @end
 %%--------------------------------------------------------------------
 -spec summary(cb_context:context()) -> cb_context:context().
-summary(Context) -> 
+summary(Context) ->
     Context1 = set_master_account_db(Context),
     crossbar_doc:load_view(?CB_LIST, [], Context1, fun normalize_view_results/2).
 

@@ -279,7 +279,8 @@ maybe_import_credintials(UserId, #cb_context{doc=JObj}=Context) ->
 maybe_validate_username(UserId, #cb_context{doc=JObj}=Context) ->
     NewUsername = wh_json:get_ne_value(<<"username">>, JObj),
     CurrentUsername = case cb_context:fetch(Context, 'db_doc') of
-                          'undefined' -> NewUsername;
+                          %'undefined' -> NewUsername;
+                          'undefined' -> 'undefined';
                           CurrentJObj ->
                               wh_json:get_ne_value(<<"username">>, CurrentJObj, NewUsername)
                       end,
